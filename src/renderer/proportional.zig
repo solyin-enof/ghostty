@@ -111,7 +111,8 @@ pub fn layout(
                 x += 1;
                 continue;
             }
-            if (words.items.len > row_start[y] and (gap >= 2 or gap_empty)) padded[y] = true;
+            const after_padding = gap >= 2 or gap_empty;
+            if (words.items.len > row_start[y] and after_padding) padded[y] = true;
             gap = 0;
             gap_empty = false;
 
@@ -121,6 +122,7 @@ pub fn layout(
                 .l = @intCast(l),
                 .r = @intCast(x - 1),
                 .width = n[x] - n[l],
+                .after_padding = after_padding,
             });
         }
     }
@@ -230,6 +232,10 @@ const Word = struct {
     /// Natural width in pixels.
     width: f32,
 
+    /// The gap before this word (including leading indentation) is padding:
+    /// two or more blank cells, or a tab or cursor jump.
+    after_padding: bool = false,
+
     /// Union-find root of this word's chain (an index into the words).
     chain: u32 = 0,
 
@@ -248,12 +254,31 @@ fn advance(cell: Cell, cell_width: f32) f32 {
 /// enough (a short last row of `ls -C`). Otherwise it takes a large share
 /// of the longer row's: the widest row of a column has no padding (GNU
 /// `ls -l`), but neither does prose, and a prose line can share several
-/// edges with a short table row by coincidence.
+/// edges with a short table row by coincidence. Failing that, rows couple
+/// when one row's padding lines its words up with the other's.
 fn coupled(a: []const Word, b: []const Word, both_padded: bool) bool {
     if (a.len == 0 or b.len == 0) return false;
+    if (paddedOnto(a, b) or paddedOnto(b, a)) return true;
     const shared: f32 = @floatFromInt(sharedEdges(a, b, "l") + sharedEdges(a, b, "r"));
     const words: f32 = @floatFromInt(2 * if (both_padded) @min(a.len, b.len) else @max(a.len, b.len));
     return shared >= words * if (both_padded) couple_padded else couple_unpadded;
+}
+
+/// True if `a` has at least two words after padding and every one of them
+/// starts where a word of `b` starts: the padding is there to line up with
+/// `b`, even when `b` has none of its own because it holds the widest
+/// entries (French `git status`, whose labels end in a no-break space).
+/// Only left edges count; a right edge matches prose too easily.
+fn paddedOnto(a: []const Word, b: []const Word) bool {
+    var count: usize = 0;
+    for (a) |w| {
+        if (!w.after_padding) continue;
+        for (b) |o| {
+            if (o.l == w.l) break;
+        } else return false;
+        count += 1;
+    }
+    return count >= 2;
 }
 
 /// Count columns where both rows have a word edge of the given side.
@@ -375,7 +400,7 @@ fn mode(ws: []const Word, members: []const u32, comptime side: []const u8) struc
 const testing = std.testing;
 const test_cell_width: f32 = 12;
 
-fn testAdvance(c: u8) f32 {
+fn testAdvance(c: u21) f32 {
     return switch (c) {
         'i' => 3,
         'W' => 12,
@@ -386,15 +411,16 @@ fn testAdvance(c: u8) f32 {
 
 const Fixture = struct {
     alloc: Allocator,
-    /// Each row as the terminal would hold it; 0 is a never-written cell.
-    lines: [][]u8,
+    /// Each row as the terminal would hold it, one codepoint per cell;
+    /// 0 is a never-written cell.
+    lines: [][]u21,
     cells: []Cell,
     rows: []Row,
     out: []f32,
     cols: usize,
 
     fn init(alloc: Allocator, text: []const u8) !Fixture {
-        var lines: std.ArrayList([]u8) = .empty;
+        var lines: std.ArrayList([]u21) = .empty;
         errdefer {
             for (lines.items) |l| alloc.free(l);
             lines.deinit(alloc);
@@ -402,9 +428,10 @@ const Fixture = struct {
         var cols: usize = 0;
         var it = std.mem.splitScalar(u8, text, '\n');
         while (it.next()) |src| {
-            var line: std.ArrayList(u8) = .empty;
+            var line: std.ArrayList(u21) = .empty;
             errdefer line.deinit(alloc);
-            for (src) |c| {
+            var cps = (try std.unicode.Utf8View.init(src)).iterator();
+            while (cps.nextCodepoint()) |c| {
                 if (c == '~') {
                     try line.append(alloc, 0);
                     while (line.items.len % 8 != 0) try line.append(alloc, 0);
@@ -423,7 +450,7 @@ const Fixture = struct {
         for (lines.items, 0..) |line, y| {
             const rc = cells[y * cols ..][0..cols];
             for (rc, 0..) |*cell, col| {
-                const c: u8 = if (col < line.len) line[col] else 0;
+                const c: u21 = if (col < line.len) line[col] else 0;
                 cell.* = switch (c) {
                     0 => .{ .kind = .empty },
                     ' ' => .{ .kind = .space, .advance = testAdvance(' ') },
@@ -472,7 +499,11 @@ const Fixture = struct {
             }
             const start = i;
             while (i < line.len and line[i] != ' ' and line[i] != 0) i += 1;
-            if (std.mem.eql(u8, line[start..i], word)) return .{ start, i };
+            var cps = (std.unicode.Utf8View.init(word) catch unreachable).iterator();
+            var j = start;
+            while (cps.nextCodepoint()) |c| : (j += 1) {
+                if (j == i or line[j] != c) break;
+            } else if (j == i) return .{ start, i };
         }
         std.debug.panic("word '{s}' not in row {d}", .{ word, row });
     }
@@ -632,6 +663,25 @@ test "git status: file names line up, hints stay prose" {
     try f.expectLeft(&.{ .{ 3, "new.txt" }, .{ 4, "wide_module_name.zig" } });
     try f.expectLeft(&.{ .{ 9, "Makefile" }, .{ 10, "alpha.c" } });
     for ([_]usize{ 0, 1, 2, 6, 7, 8 }) |row| try f.expectNatural(row);
+}
+
+test "git status in French: padding lines up with an unpadded row" {
+    // French git ends each label with a no-break space and a colon. The
+    // longest label leaves its row with no padding at all; the other
+    // row's padding still lines its file name up with it.
+    var f = try testFixture("Modifications qui seront valid\u{e9}es :\n" ++
+        "  (utilisez \"git restore --staged <fichier>...\" pour d\u{e9}sindexer)\n" ++
+        "~nouveau fichier\u{a0}: new.txt\n" ++
+        "~supprim\u{e9}\u{a0}:        wide_module_name.zig\n" ++
+        "\n" ++
+        "~modifi\u{e9}\u{a0}:         Makefile\n" ++
+        "~modifi\u{e9}\u{a0}:         alpha.c");
+    defer f.deinit();
+
+    try f.expectLeft(&.{ .{ 2, "new.txt" }, .{ 3, "wide_module_name.zig" } });
+    try f.expectLeft(&.{ .{ 5, "Makefile" }, .{ 6, "alpha.c" } });
+    try f.expectNatural(0);
+    try f.expectNatural(1);
 }
 
 test "df: numbers right-aligned under headers, header mismatch tolerated" {

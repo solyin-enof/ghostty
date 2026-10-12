@@ -59,7 +59,13 @@ of edge, left or right, sits at the same column in both rows):
   of `ls -C` still couples);
 - otherwise: `shared >= 0.65 * 2 * max(words_r, words_r+1)`. The widest row of
   a column has no padding (GNU `ls -l`), but neither does prose, and a prose
-  line can share several edges with a short table row by coincidence.
+  line can share several edges with a short table row by coincidence;
+- or, either way, one row's padding lands on the other: it has 2+ words after
+  padding (leading indentation counts) and every one starts where a word of
+  the other row starts. French `git status` ends labels in a no-break space,
+  so the longest label's row has no padding and few words. Only left edges
+  count here: allowing right edges lets an English `git status` table row
+  couple with the prose hint above it.
 
 Measured on the fixtures: padded table pairs share >= 0.5 of the shorter row's
 edges, unpadded table rows >= 0.83 of the longer row's, prose <= 0.5.
@@ -121,6 +127,8 @@ assertion fails if alignment breaks:
   `cols * cell_width`.
 
 Mutation-checked: disabling alignment fails all 7 alignment tests; forcing
-every pair to couple fails the prose and git-status tests.
+every pair to couple fails the prose and git-status tests; dropping the
+padding rule fails the French test; letting it match right edges fails the
+English git-status test.
 
 Rendering is verified by screenshots of the built app.

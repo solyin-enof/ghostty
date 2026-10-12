@@ -14,6 +14,7 @@ const math = @import("../math.zig");
 const Surface = @import("../Surface.zig");
 const link = @import("link.zig");
 const cellpkg = @import("cell.zig");
+const proportional = @import("proportional.zig");
 const noMinContrast = cellpkg.noMinContrast;
 const constraintWidth = cellpkg.constraintWidth;
 const isCovering = cellpkg.isCovering;
@@ -175,6 +176,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// to determine if any possible changes have been made to the
         /// cells for the draw call.
         cells_rebuilt: bool = false,
+
+        /// Proportional layout (see `font-proportional-layout`). `x` holds
+        /// every cell's left edge in pixels, `cols + 1` per row, and is
+        /// empty when the layout isn't in use. The row and cell buffers
+        /// are only kept to avoid reallocating every frame.
+        proportional_x: std.ArrayList(f32) = .empty,
+        proportional_cols: usize = 0,
+        proportional_rows: std.ArrayList(proportional.Row) = .empty,
+        proportional_cells: std.ArrayList(proportional.Cell) = .empty,
 
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
@@ -578,6 +588,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             font_features: std.ArrayListUnmanaged([:0]const u8),
             font_styles: font.CodepointResolver.StyleStatus,
             font_shaping_break: configpkg.FontShapingBreak,
+            font_proportional_layout: bool,
             cursor_color: ?configpkg.Config.TerminalColor,
             cursor_opacity: f64,
             cursor_text: ?configpkg.Config.TerminalColor,
@@ -650,6 +661,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .font_features = font_features.list,
                     .font_styles = font_styles,
                     .font_shaping_break = config.@"font-shaping-break",
+                    .font_proportional_layout = config.@"font-proportional-layout",
 
                     .cursor_color = config.@"cursor-color",
                     .cursor_text = config.@"cursor-text",
@@ -843,6 +855,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             self.cells.deinit(self.alloc);
+            self.proportional_x.deinit(self.alloc);
+            self.proportional_rows.deinit(self.alloc);
+            self.proportional_cells.deinit(self.alloc);
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
@@ -2618,7 +2633,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
             }
 
-            const rebuild = state.dirty == .full or grid_size_diff;
+            // Proportional layout aligns each row against its neighbors, so
+            // a change to any row can move the others: rebuild them all.
+            const proportional_active = self.config.font_proportional_layout and
+                state.screen == .primary;
+            const rebuild = state.dirty == .full or grid_size_diff or
+                (proportional_active and std.mem.indexOfScalar(
+                    bool,
+                    state.row_data.items(.dirty),
+                    true,
+                ) != null);
+
+            if (!proportional_active) {
+                self.proportional_x.clearRetainingCapacity();
+            } else if (rebuild) {
+                self.layoutProportional() catch |err| {
+                    // Fall back to the grid for this frame.
+                    log.warn("error in proportional layout err={}", .{err});
+                    self.proportional_x.clearRetainingCapacity();
+                };
+            }
+
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
                 self.cells.reset();
@@ -2888,6 +2923,103 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // log.debug("rebuildCells complete cached_runs={}", .{
             //     self.font_shaper_cache.count(),
             // });
+        }
+
+        /// Measure every row on screen and lay it out proportionally into
+        /// `proportional_x`. See `font-proportional-layout`.
+        fn layoutProportional(self: *Self) !void {
+            const state = &self.terminal_state;
+            const rows: usize = @min(state.rows, self.cells.size.rows);
+            const cols: usize = @min(state.cols, self.cells.size.columns);
+            const cell_width: f32 = @floatFromInt(self.grid_metrics.cell_width);
+
+            self.proportional_rows.clearRetainingCapacity();
+            try self.proportional_rows.ensureTotalCapacity(self.alloc, rows);
+            try self.proportional_cells.resize(self.alloc, rows * cols);
+            try self.proportional_x.resize(self.alloc, rows * (cols + 1));
+            self.proportional_cols = cols;
+
+            const row_data = state.row_data.slice();
+            for (
+                row_data.items(.raw)[0..rows],
+                row_data.items(.cells)[0..rows],
+                0..,
+            ) |row, *cells, y| {
+                const out = self.proportional_cells.items[y * cols ..][0..cols];
+                try self.measureRow(cells, out, cell_width);
+                self.proportional_rows.appendAssumeCapacity(.{
+                    .cells = out,
+                    // Prompt and input rows never align with output.
+                    .couple = row.semantic_prompt == .none,
+                });
+            }
+
+            try proportional.layout(
+                self.alloc,
+                self.proportional_rows.items,
+                cell_width,
+                self.proportional_x.items,
+            );
+        }
+
+        /// Fill `out` with each cell's kind and natural advance. Shapes
+        /// without cursor or selection breaks so widths don't change as
+        /// those move.
+        fn measureRow(
+            self: *Self,
+            cells: *std.MultiArrayList(terminal.RenderState.Cell),
+            out: []proportional.Cell,
+            cell_width: f32,
+        ) !void {
+            const slice = cells.slice();
+            for (slice.items(.raw)[0..out.len], out) |raw, *o| o.* = .{
+                .kind = switch (raw.wide) {
+                    .spacer_tail => .text,
+                    .spacer_head => .empty,
+                    .narrow, .wide => if (!raw.hasText())
+                        .empty
+                    else if (raw.codepoint() == ' ')
+                        .space
+                    else
+                        .text,
+                },
+            };
+
+            var run_iter = self.font_shaper.runIterator(.{
+                .grid = self.font_grid,
+                .cells = slice,
+            });
+            while (try run_iter.next(self.alloc)) |run| {
+                const shaped = self.font_shaper_cache.get(run) orelse shaped: {
+                    const new_cells = try self.font_shaper.shape(run);
+                    self.font_shaper_cache.put(self.alloc, run, new_cells) catch |err| {
+                        log.warn("error caching font shaping results err={}", .{err});
+                    };
+                    break :shaped new_cells;
+                };
+
+                for (shaped) |shaper_cell| {
+                    const x = run.offset + shaper_cell.x;
+                    if (x >= out.len) continue;
+
+                    // Sprite glyphs (box drawing and such) aren't shaped
+                    // and are drawn to fill their cell, so keep its width.
+                    out[x].advance += if (run.font_index.special() != null)
+                        cell_width
+                    else
+                        shaper_cell.x_advance;
+                }
+            }
+        }
+
+        /// Pixel offset that moves cell (x, y) from its grid position to
+        /// its proportional position, or 0 when the layout isn't in use.
+        fn proportionalShift(self: *const Self, x: usize, y: usize) i32 {
+            const xs = self.proportional_x.items;
+            const stride = self.proportional_cols + 1;
+            if (x >= stride or (y + 1) * stride > xs.len) return 0;
+            const grid: f32 = @floatFromInt(x * self.grid_metrics.cell_width);
+            return @intFromFloat(@round(xs[y * stride + x] - grid));
         }
 
         fn rebuildRow(
@@ -3373,7 +3505,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x),
+                    @intCast(render.glyph.offset_x + self.proportionalShift(x, y)),
                     @intCast(render.glyph.offset_y),
                 },
             });
@@ -3404,7 +3536,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x),
+                    @intCast(render.glyph.offset_x + self.proportionalShift(x, y)),
                     @intCast(render.glyph.offset_y),
                 },
             });
@@ -3435,7 +3567,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x),
+                    @intCast(render.glyph.offset_x + self.proportionalShift(x, y)),
                     @intCast(render.glyph.offset_y),
                 },
             });
@@ -3498,7 +3630,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x + shaper_cell.x_offset),
+                    @intCast(render.glyph.offset_x + shaper_cell.x_offset +
+                        self.proportionalShift(x, y)),
                     @intCast(render.glyph.offset_y + shaper_cell.y_offset),
                 },
             });
@@ -3587,7 +3720,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x),
+                    @intCast(render.glyph.offset_x + self.proportionalShift(x, cursor_vp.y)),
                     @intCast(render.glyph.offset_y),
                 },
             }, cursor_style);
