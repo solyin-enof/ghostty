@@ -11,6 +11,7 @@ const build_config = @import("build_config.zig");
 
 const cursor = @import("renderer/cursor.zig");
 const message = @import("renderer/message.zig");
+const proportional = @import("renderer/proportional.zig");
 const size = @import("renderer/size.zig");
 pub const shadertoy = @import("renderer/shadertoy.zig");
 pub const Backend = @import("renderer/backend.zig").Backend;
@@ -62,6 +63,7 @@ test {
 
     _ = cursor;
     _ = message;
+    _ = proportional;
     _ = shadertoy;
     _ = size;
     _ = Thread;

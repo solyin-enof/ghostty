@@ -1,0 +1,697 @@
+//! Proportional layout: decides where each cell of a terminal row is
+//! drawn when the font is proportional, while keeping columns that
+//! programs lined up with padding (ls, git status, ps, df) lined up.
+//!
+//! The terminal grid is untouched; programs still see uniform cells. This
+//! only maps cells to pixel x positions. The algorithm, in short:
+//!
+//!   1. Split each row into words (runs of text cells).
+//!   2. Adjacent rows "couple" when they share enough word edges (left or
+//!      right column) to look like a table. Prose rarely does.
+//!   3. In coupled rows, words that overlap one-to-one are linked. Linked
+//!      words form chains; a chain aligns on whichever edge (left or right)
+//!      most of its members share.
+//!   4. Rows flow left to right. Padding between words collapses to at most
+//!      one cell width, and chained words are pushed right to the chain's
+//!      common edge. Iterate until nothing moves.
+//!
+//! See docs/plans/2026-10-12-proportional-layout-design.md.
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
+
+pub const Kind = enum(u2) {
+    /// A visible glyph, including the spacer tail of a wide character
+    /// and cells covered by a ligature (which have zero advance).
+    text,
+
+    /// A space that was written to the cell (U+0020).
+    space,
+
+    /// A cell that was never written: tabs, cursor movement, erase.
+    /// These keep monospace geometry so that cursor-positioned output
+    /// and trailing cursor positions stay sane.
+    empty,
+};
+
+pub const Cell = struct {
+    kind: Kind,
+
+    /// Natural advance in pixels. Ignored for `empty` cells, which are
+    /// always one cell wide.
+    advance: f32 = 0,
+};
+
+pub const Row = struct {
+    cells: []const Cell,
+
+    /// False for rows that must never align with their neighbors, such
+    /// as shell prompt and input rows.
+    couple: bool = true,
+};
+
+/// Fraction of word edges two adjacent rows must share to be treated as
+/// rows of the same table; see `coupled`. Measured on the test fixtures:
+/// padded table rows share >= 0.5 of the shorter row's edges, a table row
+/// without padding shares >= 0.83 of the longer row's, and prose (even
+/// two hint lines that start with the same words) shares <= 0.5.
+const couple_padded: f32 = 0.4;
+const couple_unpadded: f32 = 0.65;
+
+/// Lay out `rows` and write each cell's left x position into `out`, which
+/// holds `cols + 1` entries per row; the last entry is the row's end.
+/// Every row must have the same number of cells.
+///
+/// `cell_width` is the width of an `empty` cell and the widest gap that
+/// padding between aligned words collapses to. If no advance is wider
+/// than `cell_width`, no row ends past `cols * cell_width`.
+pub fn layout(
+    alloc: Allocator,
+    rows: []const Row,
+    cell_width: f32,
+    out: []f32,
+) Allocator.Error!void {
+    if (rows.len == 0) return;
+    const cols = rows[0].cells.len;
+    const stride = cols + 1;
+    assert(out.len == rows.len * stride);
+
+    var arena_state: std.heap.ArenaAllocator = .init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Natural x of every cell, as if nothing were aligned.
+    const nat = try arena.alloc(f32, out.len);
+    for (rows, 0..) |row, y| {
+        assert(row.cells.len == cols);
+        const n = nat[y * stride ..][0..stride];
+        n[0] = 0;
+        for (row.cells, 0..) |cell, x| n[x + 1] = n[x] + advance(cell, cell_width);
+    }
+
+    // Words, in row order. Words in row y are
+    // words[row_start[y]..row_start[y + 1]], sorted by column.
+    var words: std.ArrayList(Word) = .empty;
+    const row_start = try arena.alloc(u32, rows.len + 1);
+
+    // A row is padded if some gap between two of its words is wider than
+    // one space or was made by a tab or cursor movement. Prose isn't.
+    const padded = try arena.alloc(bool, rows.len);
+    for (rows, 0..) |row, y| {
+        row_start[y] = @intCast(words.items.len);
+        padded[y] = false;
+        const n = nat[y * stride ..][0..stride];
+        var x: usize = 0;
+        var gap: usize = 0;
+        var gap_empty = false;
+        while (x < cols) {
+            if (row.cells[x].kind != .text) {
+                gap += 1;
+                gap_empty = gap_empty or row.cells[x].kind == .empty;
+                x += 1;
+                continue;
+            }
+            if (words.items.len > row_start[y] and (gap >= 2 or gap_empty)) padded[y] = true;
+            gap = 0;
+            gap_empty = false;
+
+            const l = x;
+            while (x < cols and row.cells[x].kind == .text) x += 1;
+            try words.append(arena, .{
+                .l = @intCast(l),
+                .r = @intCast(x - 1),
+                .width = n[x] - n[l],
+            });
+        }
+    }
+    row_start[rows.len] = @intCast(words.items.len);
+    const ws = words.items;
+
+    // Link words across coupled rows into chains (union-find).
+    const parent = try arena.alloc(u32, ws.len);
+    for (parent, 0..) |*p, i| p.* = @intCast(i);
+    for (0..rows.len -| 1) |y| {
+        if (!rows[y].couple or !rows[y + 1].couple) continue;
+        const a = ws[row_start[y]..row_start[y + 1]];
+        const b = ws[row_start[y + 1]..row_start[y + 2]];
+        if (!coupled(a, b, padded[y] and padded[y + 1])) continue;
+        for (a, 0..) |wa, ia| {
+            const ib = pick(wa, b) orelse continue;
+            if (pick(b[ib], a) != ia) continue;
+            unite(parent, row_start[y] + @as(u32, @intCast(ia)), row_start[y + 1] + @as(u32, @intCast(ib)));
+        }
+    }
+    for (0..ws.len) |i| ws[i].chain = find(parent, @intCast(i));
+    try assignAlignment(arena, ws);
+
+    // Solve: flow every row, pushing chained words to their chain's
+    // common edge, until no chain edge moves. Edges only move right and
+    // each pass settles at least one more level of chains, so this ends.
+    const pos = try arena.alloc(f32, ws.len);
+    const edge = try arena.alloc(f32, ws.len);
+    const need = try arena.alloc(f32, ws.len);
+    @memset(edge, 0);
+    var pass: usize = 0;
+    while (pass <= ws.len) : (pass += 1) {
+        @memset(need, 0);
+        for (0..rows.len) |y| {
+            const n = nat[y * stride ..][0..stride];
+            var prev_end: f32 = 0;
+            var prev_r: ?u16 = null;
+            for (row_start[y]..row_start[y + 1]) |i| {
+                const w = ws[i];
+
+                // Padding collapses to at most one cell; leading
+                // indentation is kept as is.
+                const req = if (prev_r) |pr|
+                    prev_end + @min(n[w.l] - n[pr + 1], cell_width)
+                else
+                    n[w.l];
+
+                pos[i] = switch (w.alignment) {
+                    .none => req,
+                    .left => left: {
+                        need[w.chain] = @max(need[w.chain], req);
+                        break :left @max(req, edge[w.chain]);
+                    },
+                    .right => right: {
+                        need[w.chain] = @max(need[w.chain], req + w.width);
+                        break :right @max(req, edge[w.chain] - w.width);
+                    },
+                };
+                prev_end = pos[i] + w.width;
+                prev_r = w.r;
+            }
+        }
+
+        var moved = false;
+        for (need, edge) |nd, *e| if (nd > e.*) {
+            e.* = nd;
+            moved = true;
+        };
+        if (!moved) break;
+    }
+
+    // Write cell positions.
+    for (rows, 0..) |row, y| {
+        const n = nat[y * stride ..][0..stride];
+        const o = out[y * stride ..][0..stride];
+        var x: usize = 0;
+        var cur: f32 = 0;
+        for (row_start[y]..row_start[y + 1]) |i| {
+            const w = ws[i];
+
+            // Blank cells before a word continue naturally from the
+            // previous word but never pass the word itself.
+            while (x < w.l) : (x += 1) {
+                o[x] = @min(cur, pos[i]);
+                cur += advance(row.cells[x], cell_width);
+            }
+
+            // Cells inside a word keep their natural offsets.
+            while (x <= w.r) : (x += 1) o[x] = pos[i] + (n[x] - n[w.l]);
+            cur = pos[i] + w.width;
+        }
+        while (x < cols) : (x += 1) {
+            o[x] = cur;
+            cur += advance(row.cells[x], cell_width);
+        }
+        o[cols] = cur;
+    }
+}
+
+const Alignment = enum { none, left, right };
+
+const Word = struct {
+    /// First and last cell column, inclusive.
+    l: u16,
+    r: u16,
+
+    /// Natural width in pixels.
+    width: f32,
+
+    /// Union-find root of this word's chain (an index into the words).
+    chain: u32 = 0,
+
+    alignment: Alignment = .none,
+};
+
+fn advance(cell: Cell, cell_width: f32) f32 {
+    return switch (cell.kind) {
+        .text, .space => cell.advance,
+        .empty => cell_width,
+    };
+}
+
+/// True if two adjacent rows share enough word edges to be one table.
+/// When both rows are padded, a share of the shorter row's edges is
+/// enough (a short last row of `ls -C`). Otherwise it takes a large share
+/// of the longer row's: the widest row of a column has no padding (GNU
+/// `ls -l`), but neither does prose, and a prose line can share several
+/// edges with a short table row by coincidence.
+fn coupled(a: []const Word, b: []const Word, both_padded: bool) bool {
+    if (a.len == 0 or b.len == 0) return false;
+    const shared: f32 = @floatFromInt(sharedEdges(a, b, "l") + sharedEdges(a, b, "r"));
+    const words: f32 = @floatFromInt(2 * if (both_padded) @min(a.len, b.len) else @max(a.len, b.len));
+    return shared >= words * if (both_padded) couple_padded else couple_unpadded;
+}
+
+/// Count columns where both rows have a word edge of the given side.
+/// Words in a row don't overlap, so both lists are sorted on either edge.
+fn sharedEdges(a: []const Word, b: []const Word, comptime side: []const u8) usize {
+    var i: usize = 0;
+    var j: usize = 0;
+    var count: usize = 0;
+    while (i < a.len and j < b.len) {
+        const ea = @field(a[i], side);
+        const eb = @field(b[j], side);
+        if (ea == eb) {
+            count += 1;
+            i += 1;
+            j += 1;
+        } else if (ea < eb) i += 1 else j += 1;
+    }
+    return count;
+}
+
+/// The word in `others` that `w` corresponds to: the only word it
+/// overlaps, or else the overlapping word sharing its left edge, or else
+/// its right edge. Null if there is none or it is ambiguous.
+fn pick(w: Word, others: []const Word) ?usize {
+    // First word ending at or after w starts.
+    var lo: usize = 0;
+    var hi: usize = others.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (others[mid].r < w.l) lo = mid + 1 else hi = mid;
+    }
+    var end = lo;
+    while (end < others.len and others[end].l <= w.r) end += 1;
+
+    if (end - lo == 1) return lo;
+    for (others[lo..end], lo..) |o, i| if (o.l == w.l) return i;
+    for (others[lo..end], lo..) |o, i| if (o.r == w.r) return i;
+    return null;
+}
+
+fn find(parent: []u32, i: u32) u32 {
+    var x = i;
+    while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    return x;
+}
+
+fn unite(parent: []u32, a: u32, b: u32) void {
+    const ra = find(parent, a);
+    const rb = find(parent, b);
+    if (ra != rb) parent[@max(ra, rb)] = @min(ra, rb);
+}
+
+/// Give each chained word an alignment. A chain aligns on whichever edge
+/// the most members share (left wins ties); members off that edge, like a
+/// header wider than its column, flow naturally instead.
+fn assignAlignment(arena: Allocator, ws: []Word) Allocator.Error!void {
+    const order = try arena.alloc(u32, ws.len);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+    std.mem.sort(u32, order, ws, struct {
+        fn lessThan(words: []Word, a: u32, b: u32) bool {
+            return words[a].chain < words[b].chain;
+        }
+    }.lessThan);
+
+    var start: usize = 0;
+    while (start < order.len) {
+        var end = start + 1;
+        while (end < order.len and ws[order[end]].chain == ws[order[start]].chain) end += 1;
+        defer start = end;
+
+        const members = order[start..end];
+        if (members.len < 2) continue;
+
+        const l = mode(ws, members, "l");
+        const r = mode(ws, members, "r");
+        if (@max(l.count, r.count) < 2) continue;
+        const side: Alignment, const col = if (l.count >= r.count)
+            .{ .left, l.value }
+        else
+            .{ .right, r.value };
+        for (members) |m| {
+            const e = if (side == .left) ws[m].l else ws[m].r;
+            if (e == col) ws[m].alignment = side;
+        }
+    }
+}
+
+/// Most common value of an edge among chain members. Chains are short
+/// (one word per row at most), so quadratic is fine.
+fn mode(ws: []const Word, members: []const u32, comptime side: []const u8) struct { value: u16, count: usize } {
+    var best: u16 = 0;
+    var best_count: usize = 0;
+    for (members) |m| {
+        const v = @field(ws[m], side);
+        var count: usize = 0;
+        for (members) |o| {
+            if (@field(ws[o], side) == v) count += 1;
+        }
+        if (count > best_count) {
+            best = v;
+            best_count = count;
+        }
+    }
+    return .{ .value = best, .count = best_count };
+}
+
+// ---------------------------------------------------------------------
+// Tests
+//
+// Fixtures are real command output captured on macOS (uid/gid numeric).
+// `~` marks a TAB, which a terminal turns into never-written cells up to
+// the next multiple of 8. Metrics are fake and deliberately uneven so a
+// test fails the moment alignment stops happening: 'i' is 3px, 'W' is
+// 12px, a space is 3px, everything else is 7px, and a cell is 12px.
+
+const testing = std.testing;
+const test_cell_width: f32 = 12;
+
+fn testAdvance(c: u8) f32 {
+    return switch (c) {
+        'i' => 3,
+        'W' => 12,
+        ' ' => 3,
+        else => 7,
+    };
+}
+
+const Fixture = struct {
+    alloc: Allocator,
+    /// Each row as the terminal would hold it; 0 is a never-written cell.
+    lines: [][]u8,
+    cells: []Cell,
+    rows: []Row,
+    out: []f32,
+    cols: usize,
+
+    fn init(alloc: Allocator, text: []const u8) !Fixture {
+        var lines: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (lines.items) |l| alloc.free(l);
+            lines.deinit(alloc);
+        }
+        var cols: usize = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |src| {
+            var line: std.ArrayList(u8) = .empty;
+            errdefer line.deinit(alloc);
+            for (src) |c| {
+                if (c == '~') {
+                    try line.append(alloc, 0);
+                    while (line.items.len % 8 != 0) try line.append(alloc, 0);
+                } else try line.append(alloc, c);
+            }
+            cols = @max(cols, line.items.len);
+            try lines.append(alloc, try line.toOwnedSlice(alloc));
+        }
+        cols += 4; // some trailing never-written cells
+
+        const n = lines.items.len;
+        const cells = try alloc.alloc(Cell, n * cols);
+        errdefer alloc.free(cells);
+        const rows = try alloc.alloc(Row, n);
+        errdefer alloc.free(rows);
+        for (lines.items, 0..) |line, y| {
+            const rc = cells[y * cols ..][0..cols];
+            for (rc, 0..) |*cell, col| {
+                const c: u8 = if (col < line.len) line[col] else 0;
+                cell.* = switch (c) {
+                    0 => .{ .kind = .empty },
+                    ' ' => .{ .kind = .space, .advance = testAdvance(' ') },
+                    else => .{ .kind = .text, .advance = testAdvance(c) },
+                };
+            }
+            rows[y] = .{ .cells = rc };
+        }
+
+        const out = try alloc.alloc(f32, n * (cols + 1));
+        errdefer alloc.free(out);
+        return .{
+            .alloc = alloc,
+            .lines = try lines.toOwnedSlice(alloc),
+            .cells = cells,
+            .rows = rows,
+            .out = out,
+            .cols = cols,
+        };
+    }
+
+    fn deinit(self: *Fixture) void {
+        for (self.lines) |l| self.alloc.free(l);
+        self.alloc.free(self.lines);
+        self.alloc.free(self.cells);
+        self.alloc.free(self.rows);
+        self.alloc.free(self.out);
+    }
+
+    fn run(self: *Fixture) !void {
+        try layout(self.alloc, self.rows, test_cell_width, self.out);
+    }
+
+    fn x(self: *const Fixture, row: usize, col: usize) f32 {
+        return self.out[row * (self.cols + 1) + col];
+    }
+
+    /// Column span of the first whitespace-delimited word equal to `word`.
+    fn span(self: *const Fixture, row: usize, word: []const u8) [2]usize {
+        const line = self.lines[row];
+        var i: usize = 0;
+        while (i < line.len) {
+            if (line[i] == ' ' or line[i] == 0) {
+                i += 1;
+                continue;
+            }
+            const start = i;
+            while (i < line.len and line[i] != ' ' and line[i] != 0) i += 1;
+            if (std.mem.eql(u8, line[start..i], word)) return .{ start, i };
+        }
+        std.debug.panic("word '{s}' not in row {d}", .{ word, row });
+    }
+
+    fn startX(self: *const Fixture, row: usize, word: []const u8) f32 {
+        return self.x(row, self.span(row, word)[0]);
+    }
+
+    fn endX(self: *const Fixture, row: usize, word: []const u8) f32 {
+        return self.x(row, self.span(row, word)[1]);
+    }
+
+    /// Words given as .{ row, word } all start at the same x.
+    fn expectLeft(self: *const Fixture, members: []const struct { usize, []const u8 }) !void {
+        const want = self.startX(members[0][0], members[0][1]);
+        for (members[1..]) |m| try testing.expectEqual(want, self.startX(m[0], m[1]));
+    }
+
+    /// Words given as .{ row, word } all end at the same x.
+    fn expectRight(self: *const Fixture, members: []const struct { usize, []const u8 }) !void {
+        const want = self.endX(members[0][0], members[0][1]);
+        for (members[1..]) |m| try testing.expectEqual(want, self.endX(m[0], m[1]));
+    }
+
+    /// Row is laid out exactly as natural flow (nothing inserted).
+    fn expectNatural(self: *const Fixture, row: usize) !void {
+        var nat: f32 = 0;
+        for (self.rows[row].cells, 0..) |cell, col| {
+            try testing.expectApproxEqAbs(nat, self.x(row, col), 0.001);
+            nat += advance(cell, test_cell_width);
+        }
+    }
+
+    /// Positions never go backwards and no row ends past its monospace end.
+    fn expectInvariants(self: *const Fixture) !void {
+        const limit = @as(f32, @floatFromInt(self.cols)) * test_cell_width;
+        for (0..self.rows.len) |row| {
+            for (0..self.cols) |col| try testing.expect(self.x(row, col) <= self.x(row, col + 1));
+            try testing.expect(self.x(row, self.cols) <= limit + 0.001);
+        }
+    }
+};
+
+fn testFixture(text: []const u8) !Fixture {
+    var f = try Fixture.init(testing.allocator, text);
+    errdefer f.deinit();
+    try f.run();
+    try f.expectInvariants();
+    return f;
+}
+
+test "ls -C (GNU, spaces and tabs): name columns line up" {
+    var f = try testFixture(
+        \\MOMMY.WAV  WWWWWW.md~iiii.txt     mmmmmmmmmm.c
+        \\Makefile   a~~illicit.lit  my file.txt
+        \\README.md  config.yaml~lil~     src
+    );
+    defer f.deinit();
+
+    try f.expectLeft(&.{ .{ 0, "WWWWWW.md" }, .{ 1, "a" }, .{ 2, "config.yaml" } });
+    try f.expectLeft(&.{ .{ 0, "iiii.txt" }, .{ 1, "illicit.lit" }, .{ 2, "lil" } });
+    // "my file.txt" overlaps the name above it twice; it still links by
+    // its left edge, so the whole column lines up.
+    try f.expectLeft(&.{ .{ 0, "mmmmmmmmmm.c" }, .{ 1, "my" }, .{ 2, "src" } });
+    // The space inside the filename stays a plain space.
+    try testing.expectApproxEqAbs(
+        f.endX(1, "my") + testAdvance(' '),
+        f.startX(1, "file.txt"),
+        0.001,
+    );
+}
+
+test "ls -C (BSD, tabs only): name columns line up" {
+    var f = try testFixture(
+        \\MOMMY.WAV~a~~lil
+        \\Makefile~config.yaml~mmmmmmmmmm.c
+        \\README.md~iiii.txt~my file.txt
+        \\WWWWWW.md~illicit.lit~src
+    );
+    defer f.deinit();
+
+    try f.expectLeft(&.{ .{ 0, "a" }, .{ 1, "config.yaml" }, .{ 2, "iiii.txt" }, .{ 3, "illicit.lit" } });
+    try f.expectLeft(&.{ .{ 0, "lil" }, .{ 1, "mmmmmmmmmm.c" }, .{ 2, "my" }, .{ 3, "src" } });
+    // Tab padding collapses to a one-cell gap after the widest name
+    // instead of keeping the tab's monospace width.
+    const widest = @max(
+        @max(f.endX(0, "MOMMY.WAV"), f.endX(1, "Makefile")),
+        @max(f.endX(2, "README.md"), f.endX(3, "WWWWWW.md")),
+    );
+    try testing.expectApproxEqAbs(widest + test_cell_width, f.startX(0, "a"), 0.001);
+}
+
+test "ls -l (BSD): left and right aligned fields" {
+    var f = try testFixture(
+        \\total 112
+        \\-rw-r--r--  1 502  0      0 Oct 12 03:38 MOMMY.WAV
+        \\-rw-r--r--  1 502  0    912 Oct 12 04:18 Makefile
+        \\-rw-r--r--  1 502  0      0 Oct  2  2025 README.md
+        \\-rw-r--r--  1 502  0  48213 Oct 12 04:18 WWWWWW.md
+        \\-rw-r--r--  1 502  0      0 Mar  5  2026 illicit.lit
+        \\-rw-r--r--  1 502  0      0 Oct 12 03:38 mmmmmmmmmm.c
+        \\-rw-r--r--  1 502  0      0 Oct 12 04:18 my file.txt
+        \\drwxr-xr-x  2 502  0     64 Oct 12 04:18 src
+    );
+    defer f.deinit();
+
+    try f.expectNatural(0); // "total" shares too little with the table
+    try f.expectLeft(&.{ .{ 1, "502" }, .{ 4, "502" }, .{ 8, "502" } });
+    try f.expectRight(&.{ .{ 2, "912" }, .{ 4, "48213" }, .{ 8, "64" } });
+    try f.expectLeft(&.{ .{ 1, "Oct" }, .{ 5, "Mar" }, .{ 8, "Oct" } });
+    try f.expectRight(&.{ .{ 1, "12" }, .{ 3, "2" }, .{ 5, "5" } });
+    try f.expectRight(&.{ .{ 1, "03:38" }, .{ 3, "2025" }, .{ 5, "2026" } });
+    try f.expectLeft(&.{
+        .{ 1, "MOMMY.WAV" }, .{ 2, "Makefile" },    .{ 3, "README.md" },
+        .{ 4, "WWWWWW.md" }, .{ 5, "illicit.lit" }, .{ 6, "mmmmmmmmmm.c" },
+        .{ 7, "my" },        .{ 8, "src" },
+    });
+}
+
+test "ls -l (GNU, single spaces): fields still align" {
+    var f = try testFixture(
+        \\-rw-r--r-- 1 502 0     0 Oct 12 03:38 MOMMY.WAV
+        \\-rw-r--r-- 1 502 0   912 Oct 12 04:18 Makefile
+        \\-rw-r--r-- 1 502 0     0 Oct  2  2025 README.md
+        \\-rw-r--r-- 1 502 0 48213 Oct 12 04:18 WWWWWW.md
+        \\drwxr-xr-x 2 502 0    64 Oct 12 04:18 src
+    );
+    defer f.deinit();
+
+    // Permissions differ in glyph width ('d', 'x' vs '-'); everything
+    // after them must still line up.
+    try f.expectRight(&.{ .{ 0, "1" }, .{ 4, "2" } });
+    try f.expectRight(&.{ .{ 1, "912" }, .{ 3, "48213" }, .{ 4, "64" } });
+    try f.expectRight(&.{ .{ 0, "03:38" }, .{ 2, "2025" } });
+    try f.expectLeft(&.{
+        .{ 0, "MOMMY.WAV" }, .{ 1, "Makefile" }, .{ 2, "README.md" },
+        .{ 3, "WWWWWW.md" }, .{ 4, "src" },
+    });
+}
+
+test "git status: file names line up, hints stay prose" {
+    var f = try testFixture(
+        \\On branch main
+        \\Changes to be committed:
+        \\  (use "git restore --staged <file>..." to unstage)
+        \\~new file:   new.txt
+        \\~deleted:    wide_module_name.zig
+        \\
+        \\Changes not staged for commit:
+        \\  (use "git add <file>..." to update what will be committed)
+        \\  (use "git restore <file>..." to discard changes in working directory)
+        \\~modified:   Makefile
+        \\~modified:   alpha.c
+    );
+    defer f.deinit();
+
+    try f.expectLeft(&.{ .{ 3, "new.txt" }, .{ 4, "wide_module_name.zig" } });
+    try f.expectLeft(&.{ .{ 9, "Makefile" }, .{ 10, "alpha.c" } });
+    for ([_]usize{ 0, 1, 2, 6, 7, 8 }) |row| try f.expectNatural(row);
+}
+
+test "df: numbers right-aligned under headers, header mismatch tolerated" {
+    var f = try testFixture(
+        \\Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+        \\/dev/disk3s1s1   7.3Ti    17Gi   2.0Ti     1%    427k  4.3G    0%   /
+        \\/dev/disk3s5     7.3Ti   5.2Ti   2.0Ti    72%     20M   22G    0%   /System/Volumes/Data
+    );
+    defer f.deinit();
+
+    try f.expectRight(&.{ .{ 0, "Size" }, .{ 1, "7.3Ti" }, .{ 2, "7.3Ti" } });
+    try f.expectRight(&.{ .{ 0, "Used" }, .{ 1, "17Gi" }, .{ 2, "5.2Ti" } });
+    try f.expectRight(&.{ .{ 0, "Avail" }, .{ 1, "2.0Ti" }, .{ 2, "2.0Ti" } });
+    // macOS df pads "Capacity" and "%iused" wider than their values; the
+    // values still line up with each other.
+    try f.expectRight(&.{ .{ 1, "1%" }, .{ 2, "72%" } });
+    try f.expectRight(&.{ .{ 0, "iused" }, .{ 1, "427k" }, .{ 2, "20M" } });
+    try f.expectRight(&.{ .{ 0, "ifree" }, .{ 1, "4.3G" }, .{ 2, "22G" } });
+    try f.expectLeft(&.{ .{ 0, "Mounted" }, .{ 1, "/" }, .{ 2, "/System/Volumes/Data" } });
+}
+
+test "ps: mixed left and right columns" {
+    var f = try testFixture(
+        \\  PID STAT      TIME COMM
+        \\    1 Ss    17:17.79 /sbin/launchd
+    );
+    defer f.deinit();
+
+    try f.expectRight(&.{ .{ 0, "PID" }, .{ 1, "1" } });
+    try f.expectLeft(&.{ .{ 0, "STAT" }, .{ 1, "Ss" } });
+    try f.expectRight(&.{ .{ 0, "TIME" }, .{ 1, "17:17.79" } });
+    try f.expectLeft(&.{ .{ 0, "COMM" }, .{ 1, "/sbin/launchd" } });
+}
+
+test "prose is never torn apart by coincidental alignment" {
+    var f = try testFixture(
+        \\The terminal grid is a fifty year old contract between programs
+        \\and screens. Every character takes one cell, so a program can
+        \\line up a table by counting characters and padding with spaces.
+        \\A proportional font breaks that contract, unless the terminal
+        \\can recover the intent behind the padding and honor it anyway.
+    );
+    defer f.deinit();
+
+    for (0..f.rows.len) |row| try f.expectNatural(row);
+}
+
+test "rows marked not to couple are left alone" {
+    var f = try Fixture.init(testing.allocator,
+        \\MOMMY.WAV  WWWWWW.md
+        \\Makefile   a
+    );
+    defer f.deinit();
+    f.rows[1].couple = false;
+    try f.run();
+
+    try f.expectNatural(0);
+    try f.expectNatural(1);
+}
+
+test "empty input" {
+    try layout(testing.allocator, &.{}, test_cell_width, &.{});
+}

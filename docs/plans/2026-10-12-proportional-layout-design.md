@@ -49,22 +49,31 @@ has cell columns `[L, R]` and a natural pixel width.
 the natural width of the blank cells between them. The first word starts at
 the natural width of the leading blanks (indentation is preserved).
 
-**Coupling (is this pair of rows a table?).** Adjacent rows *r*, *r+1* couple
-when both may couple and they share enough word edges:
-`shared / min(|E_r|, |E_r+1|) >= 0.4`, where `E` is the set of left edges
-(`L` columns) and right edges (`R` columns) of a row's words, and an edge is
-shared when the same kind of edge sits at the same column in both rows.
-Tables share most edges (~0.5-1.0); wrapped prose shares ~0.15 by chance.
-This is what stops prose from being torn apart by coincidental alignment.
+**Coupling (is this pair of rows a table?).** A row is *padded* if some gap
+between two of its words is 2+ blank cells or contains a never-written cell
+(tab, cursor jump). Prose isn't. Adjacent rows *r*, *r+1* couple when both may
+couple and they share enough word edges (an edge is shared when the same kind
+of edge, left or right, sits at the same column in both rows):
 
-**Links.** In a coupled pair, word *a* (row r) links to word *b* (row r+1)
-when their column ranges overlap and the overlap is one-to-one (each overlaps
-only the other). Ambiguous overlaps (a filename with a space under a filename
-without) don't link; the chain just splits there.
+- both padded: `shared >= 0.4 * 2 * min(words_r, words_r+1)` (a short last row
+  of `ls -C` still couples);
+- otherwise: `shared >= 0.65 * 2 * max(words_r, words_r+1)`. The widest row of
+  a column has no padding (GNU `ls -l`), but neither does prose, and a prose
+  line can share several edges with a short table row by coincidence.
 
-**Chains.** Connected components of links. A chain whose members all share
-`L` is *left-aligned*; else if all share `R` it is *right-aligned* (ls -l
-sizes, day-of-month); otherwise it is not aligned (natural flow).
+Measured on the fixtures: padded table pairs share >= 0.5 of the shorter row's
+edges, unpadded table rows >= 0.83 of the longer row's, prose <= 0.5.
+
+**Links.** In a coupled pair, word *a* (row r) picks a word in row r+1: the
+only word it overlaps, else the overlapping word with the same left edge, else
+the one with the same right edge. *a* and *b* link when they pick each other.
+(`mmmmmmmmmm.c` above `my file.txt` overlaps two words and picks `my` by its
+left edge.)
+
+**Chains.** Connected components of links. A chain aligns on whichever edge
+the most members share (left wins ties, at least 2 members). Members off that
+edge flow naturally: macOS `df` pads the `Capacity` header wider than its
+values, and the values still right-align with each other.
 
 **Solve.** Each row is flowed left to right. A word's required start is the
 previous word's end plus `min(natural_gap, gap)` (`gap` defaults to
@@ -79,10 +88,11 @@ end, clamped to the next word's start. Trailing cells continue naturally.
 Positions are monotonic within a row.
 
 **No-overflow invariant.** Ghostty's `cell_width` is the max ASCII advance, so
-every natural width is `<=` its cell count times `cell_width`, every gap is
-`<=` its natural width, and by induction no ASCII cell lands right of its
-monospace position. (Breaks if `adjust-cell-width` shrinks the cell; then we
-clip. Compression is future work.)
+every natural width is `<=` its cell count times `cell_width` and every gap is
+`<=` its natural width. By induction every word ends at or before its
+monospace end, so no row ends past `cols * cell_width`. (Breaks if
+`adjust-cell-width` shrinks the cell; then we clip. Compression is future
+work.)
 
 ## Milestones
 
@@ -101,13 +111,16 @@ stability (columns can jump while output arrives).
 ## Testing
 
 `proportional.zig` unit tests use fixtures captured from real commands, with
-fake metrics (`i`=3px, `W`=12px, others 7px, space 3px, empty = 10px cell) so
-every assertion fails if alignment breaks:
+fake metrics (`i`=3px, `W`=12px, others 7px, space 3px, cell 12px) so every
+assertion fails if alignment breaks:
 
 - aligned output (ls -C, ls -l, git status, ps): every member of a column
   starts (or, right-aligned, ends) at the same x;
 - prose: no gap wider than the natural gap is ever inserted;
-- invariants on all fixtures: x is monotonic per row, and no cell is right of
-  `col * cell_width`.
+- invariants on all fixtures: x is monotonic per row, and no row ends past
+  `cols * cell_width`.
+
+Mutation-checked: disabling alignment fails all 7 alignment tests; forcing
+every pair to couple fails the prose and git-status tests.
 
 Rendering is verified by screenshots of the built app.
