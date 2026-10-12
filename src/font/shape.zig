@@ -50,6 +50,12 @@ pub const Cell = struct {
     x_offset: i16 = 0,
     y_offset: i16 = 0,
 
+    /// The natural horizontal advance of this glyph in pixels as reported
+    /// by the shaper. The grid ignores it since every cell is the same
+    /// width; proportional layout uses it to size cells. Shapers that
+    /// don't report advances leave it at zero.
+    x_advance: f32 = 0,
+
     /// The glyph index for this cell. The font index to use alongside
     /// this cell is available in the text run. This glyph index is only
     /// valid for a given GroupCache and FontIndex that was used to create

@@ -239,6 +239,7 @@ pub const Shaper = struct {
                 .x = @intCast(cell_offset.cluster),
                 .x_offset = @intCast(x_offset),
                 .y_offset = @intCast(y_offset),
+                .x_advance = @as(f32, @floatFromInt(pos_v.x_advance)) / 64,
                 .glyph_index = info_v.codepoint,
             });
 

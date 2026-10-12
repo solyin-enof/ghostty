@@ -508,6 +508,7 @@ pub const Shaper = struct {
                     .x = @intCast(cell_offset.cluster),
                     .x_offset = @intFromFloat(@round(x_offset)),
                     .y_offset = @intFromFloat(@round(position.y)),
+                    .x_advance = @floatCast(advance.width),
                     .glyph_index = glyph,
                 });
 
@@ -1321,6 +1322,44 @@ test "shape emoji width" {
         }
         try testing.expectEqual(@as(usize, 1), count);
     }
+}
+
+test "shape reports each glyph's natural advance" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaper(alloc);
+    defer testdata.deinit();
+
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("ab👍");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+    var advances: std.ArrayList(f32) = .empty;
+    defer advances.deinit(alloc);
+    while (try it.next(alloc)) |run| {
+        for (try shaper.shape(run)) |cell| try advances.append(alloc, cell.x_advance);
+    }
+
+    // Proportional layout sizes cells from these, so they must be each
+    // glyph's own width: nonzero, equal for two letters of a monospace
+    // font, and wider for the emoji.
+    try testing.expectEqual(@as(usize, 3), advances.items.len);
+    try testing.expect(advances.items[0] > 0);
+    try testing.expectEqual(advances.items[0], advances.items[1]);
+    try testing.expect(advances.items[2] > advances.items[0]);
 }
 
 test "shape emoji width long" {
