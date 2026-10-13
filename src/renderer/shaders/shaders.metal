@@ -24,7 +24,34 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  bool proportional;
 };
+
+// With proportional layout every row has its own cell x positions:
+// cell_x holds grid_size.x + 1 entries per row, the left edge of each
+// cell and then the row's end. Returns the column whose span contains
+// px (relative to the grid's left edge): the last cell starting at or
+// before it, so zero-width cells are skipped.
+int proportional_column(
+  constant float *cell_x,
+  ushort2 grid_size,
+  int y,
+  float px
+) {
+  constant float *xs = cell_x + y * (grid_size.x + 1);
+  if (px >= xs[grid_size.x]) return grid_size.x - 1;
+  int lo = 0;
+  int hi = grid_size.x - 1;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) / 2;
+    if (xs[mid] <= px) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
 
 //-------------------------------------------------------------------
 // Color Functions
@@ -451,9 +478,23 @@ fragment float4 bg_image_fragment(
 fragment float4 cell_bg_fragment(
   FullScreenVertexOut in [[stage_in]],
   constant Uniforms& uniforms [[buffer(1)]],
-  constant uchar4 *cells [[buffer(2)]]
+  constant uchar4 *cells [[buffer(2)]],
+  constant float *cell_x [[buffer(3)]]
 ) {
   int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
+
+  // Inside the grid, proportional rows map x to a cell by its own span.
+  // Past the end of a row's text, the last cell's color carries on.
+  if (uniforms.proportional &&
+      grid_pos.y >= 0 && grid_pos.y < uniforms.grid_size.y &&
+      grid_pos.x >= 0 && grid_pos.x < uniforms.grid_size.x) {
+    grid_pos.x = proportional_column(
+      cell_x,
+      uniforms.grid_size,
+      grid_pos.y,
+      in.position.x - uniforms.grid_padding.w
+    );
+  }
 
   float4 bg = float4(0.0);
 
@@ -520,6 +561,8 @@ enum CellTextBools : uint8_t {
   NO_MIN_CONTRAST = 1u,
   // This is the cursor glyph.
   IS_CURSOR_GLYPH = 2u,
+  // Stretch this sprite to its cell's proportional width.
+  STRETCH = 4u,
 };
 
 struct CellTextVertexIn {
@@ -551,13 +594,19 @@ struct CellTextVertexOut {
   float4 color [[flat]];
   float4 bg_color [[flat]];
   float2 tex_coord;
+
+  // For a stretched sprite: x within the quad, and (quad width, glyph
+  // width, glyph x in the atlas, 1). The last component is 0 otherwise.
+  float quad_x;
+  float4 slice [[flat]];
 };
 
 vertex CellTextVertexOut cell_text_vertex(
   uint vid [[vertex_id]],
   CellTextVertexIn in [[stage_in]],
   constant Uniforms& uniforms [[buffer(1)]],
-  constant uchar4 *bg_colors [[buffer(2)]]
+  constant uchar4 *bg_colors [[buffer(2)]],
+  constant float *cell_x [[buffer(3)]]
 ) {
   // Convert the grid x, y into world space x, y by accounting for cell size
   float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
@@ -611,6 +660,25 @@ vertex CellTextVertexOut cell_text_vertex(
 
   float2 size = float2(in.glyph_size);
   float2 offset = float2(in.bearings);
+
+  // Sprites like the cursor and underlines are drawn one or two grid
+  // cells wide; with proportional layout, fit them to their cells.
+  // (Their x position already comes from the bearings.)
+  out.slice = float4(0.0);
+  if (uniforms.proportional && (in.bools & STRETCH) != 0) {
+    int cells = max(1, int(round(size.x / uniforms.cell_size.x)));
+    int end = min(int(in.grid_pos.x) + cells, int(uniforms.grid_size.x));
+    constant float *xs = cell_x + in.grid_pos.y * (uniforms.grid_size.x + 1);
+    size.x = xs[end] - xs[in.grid_pos.x];
+    out.slice = float4(size.x, float(in.glyph_size.x), float(in.glyph_pos.x), 1.0);
+
+    // The bearings carry the cell's x rounded to whole pixels; use the
+    // exact edge instead so neighboring sprites meet without gaps.
+    float grid_x = uniforms.cell_size.x * float(in.grid_pos.x);
+    float shift = xs[in.grid_pos.x] - grid_x;
+    offset.x += shift - round(shift);
+  }
+  out.quad_x = size.x * corner.x;
 
   offset.y = uniforms.cell_size.y - offset.y;
 
@@ -687,6 +755,19 @@ fragment float4 cell_text_fragment(
     filter::nearest
   );
 
+  // A stretched sprite keeps both of its halves at native scale and
+  // only stretches (or squeezes out) its middle, so the sides of a
+  // hollow cursor keep their thickness at any width.
+  float2 tex_coord = in.tex_coord;
+  if (in.slice.w > 0.0) {
+    float quad_w = in.slice.x;
+    float glyph_w = in.slice.y;
+    float x = in.quad_x < quad_w / 2.0
+      ? min(in.quad_x, glyph_w / 2.0)
+      : max(glyph_w - (quad_w - in.quad_x), glyph_w / 2.0);
+    tex_coord.x = in.slice.z + x;
+  }
+
   switch (in.atlas) {
     default:
     case ATLAS_GRAYSCALE: {
@@ -705,7 +786,7 @@ fragment float4 cell_text_fragment(
       }
 
       // Fetch our alpha mask for this pixel.
-      float a = textureGrayscale.sample(textureSampler, in.tex_coord).r;
+      float a = textureGrayscale.sample(textureSampler, tex_coord).r;
 
       // Linear blending weight correction corrects the alpha value to
       // produce blending results which match gamma-incorrect blending.
@@ -742,7 +823,7 @@ fragment float4 cell_text_fragment(
     case ATLAS_COLOR: {
       // For now, we assume that color glyphs
       // are already premultiplied linear colors.
-      float4 color = textureColor.sample(textureSampler, in.tex_coord);
+      float4 color = textureColor.sample(textureSampler, tex_coord);
 
       // If we're doing linear blending, we can return this right away.
       if (uniforms.use_linear_blending) {

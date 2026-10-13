@@ -218,7 +218,11 @@ pub const Uniforms = extern struct {
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool = false,
 
-        _padding: u28 = 0,
+        /// Cells have their own x positions (see `font-proportional-layout`).
+        /// Not used by the OpenGL shaders yet.
+        proportional: bool = false,
+
+        _padding: u27 = 0,
     };
 
     const PaddingExtend = packed struct(u32) {
@@ -241,7 +245,10 @@ pub const CellText = extern struct {
     bools: packed struct(u8) {
         no_min_contrast: bool = false,
         is_cursor_glyph: bool = false,
-        _padding: u6 = 0,
+        /// Stretch this sprite to its cell's proportional width.
+        /// Not used by the OpenGL shaders yet.
+        stretch: bool = false,
+        _padding: u5 = 0,
     } align(1) = .{},
 
     pub const Atlas = enum(u8) {

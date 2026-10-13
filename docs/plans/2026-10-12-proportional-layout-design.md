@@ -107,6 +107,14 @@ work.)
    `ls -C`, `ls -l`, `git status`, and a prose paragraph.
 2. Backgrounds and selection highlight: pass `x_map` to the GPU; background
    shader looks up the cell per row. Cursor block via the same map.
+   *Done:* a per-frame `cell_x` buffer (shader buffer 3) plus a
+   `proportional` uniform. `cell_bg_fragment` binary-searches the row's cell
+   edges (past a row's end the last cell's color carries on). Sprites flagged
+   `stretch` (block, hollow and underline cursors; underline, strikethrough,
+   overline) are fit to their cell span on exact fractional edges, and sampled
+   as a 3-slice (both halves native, middle stretched) so hollow-cursor sides
+   keep their thickness. The bar cursor isn't stretched. OpenGL structs carry
+   the new fields but GLSL ignores them.
 3. Mouse: selection, mouse reporting, link hover map pixel -> cell through
    `x_map` (renderer thread builds it, app thread reads it: needs a handoff).
 4. Decoration widths (underline length), IME rect, config polish.

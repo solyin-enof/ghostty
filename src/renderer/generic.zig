@@ -362,6 +362,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cells: CellTextBuffer,
             cells_bg: CellBgBuffer,
 
+            /// Every cell's left edge in pixels when proportional layout
+            /// is on (see `Renderer.proportional_x`); unused otherwise.
+            cell_x: CellXBuffer,
+
             grayscale: Texture,
             grayscale_modified: usize = 0,
             color: Texture,
@@ -385,6 +389,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const UniformBuffer = Buffer(shaderpkg.Uniforms);
             const CellBgBuffer = Buffer(shaderpkg.CellBg);
             const CellTextBuffer = Buffer(shaderpkg.CellText);
+            const CellXBuffer = Buffer(f32);
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
 
             pub fn init(api: GraphicsAPI, custom_shaders: bool) !FrameState {
@@ -404,6 +409,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 errdefer cells.deinit();
                 var cells_bg = try CellBgBuffer.init(api.bgBufferOptions(), 1);
                 errdefer cells_bg.deinit();
+                var cell_x = try CellXBuffer.init(api.bgBufferOptions(), 1);
+                errdefer cell_x.deinit();
 
                 // Create a GPU buffer for our background image info.
                 var bg_image_buffer = try BgImageBuffer.init(
@@ -444,6 +451,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .uniforms = uniforms,
                     .cells = cells,
                     .cells_bg = cells_bg,
+                    .cell_x = cell_x,
                     .bg_image_buffer = bg_image_buffer,
                     .grayscale = grayscale,
                     .color = color,
@@ -457,6 +465,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.deinit();
                 self.cells.deinit();
                 self.cells_bg.deinit();
+                self.cell_x.deinit();
                 self.grayscale.deinit();
                 self.color.deinit();
                 self.bg_image_buffer.deinit();
@@ -1860,6 +1869,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Setup our frame data
             try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
+            try frame.cell_x.sync(self.proportional_x.items);
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
 
             // If our background image buffer has changed, sync it.
@@ -1943,7 +1953,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 pass.step(.{
                     .pipeline = self.shaders.pipelines.cell_bg,
                     .uniforms = frame.uniforms.buffer,
-                    .buffers = &.{ null, frame.cells_bg.buffer },
+                    .buffers = &.{ null, frame.cells_bg.buffer, frame.cell_x.buffer },
                     .draw = .{ .type = .triangle, .vertex_count = 3 },
                 });
 
@@ -1962,6 +1972,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .buffers = &.{
                         frame.cells.buffer,
                         frame.cells_bg.buffer,
+                        frame.cell_x.buffer,
                     },
                     .textures = &.{
                         frame.grayscale,
@@ -2653,6 +2664,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.proportional_x.clearRetainingCapacity();
                 };
             }
+            self.uniforms.bools.proportional = self.proportional_x.items.len > 0;
 
             if (rebuild) {
                 // If we are doing a full rebuild, then we clear the entire cell buffer.
@@ -3500,6 +3512,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             try self.cells.add(self.alloc, .underline, .{
                 .atlas = .grayscale,
+                .bools = .{ .stretch = true },
                 .grid_pos = .{ @intCast(x), @intCast(y) },
                 .color = .{ color.r, color.g, color.b, alpha },
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
@@ -3531,6 +3544,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             try self.cells.add(self.alloc, .overline, .{
                 .atlas = .grayscale,
+                .bools = .{ .stretch = true },
                 .grid_pos = .{ @intCast(x), @intCast(y) },
                 .color = .{ color.r, color.g, color.b, alpha },
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
@@ -3562,6 +3576,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             try self.cells.add(self.alloc, .strikethrough, .{
                 .atlas = .grayscale,
+                .bools = .{ .stretch = true },
                 .grid_pos = .{ @intCast(x), @intCast(y) },
                 .color = .{ color.r, color.g, color.b, alpha },
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
@@ -3714,7 +3729,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.cells.setCursor(.{
                 .atlas = .grayscale,
-                .bools = .{ .is_cursor_glyph = true },
+                .bools = .{
+                    .is_cursor_glyph = true,
+                    // A bar keeps its thickness; a lock is a glyph.
+                    .stretch = switch (cursor_style) {
+                        .block, .block_hollow, .underline => true,
+                        .bar, .lock => false,
+                    },
+                },
                 .grid_pos = .{ x, cursor_vp.y },
                 .color = .{ cursor_color.r, cursor_color.g, cursor_color.b, alpha },
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },

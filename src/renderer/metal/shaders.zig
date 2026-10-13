@@ -252,6 +252,10 @@ pub const Uniforms = extern struct {
         /// with linear alpha blending have a similar apparent weight
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool align(1) = false,
+
+        /// Cells have their own x positions (see `font-proportional-layout`)
+        /// in the cell x buffer instead of `cell_size.x * column`.
+        proportional: bool align(1) = false,
     },
 
     const PaddingExtend = packed struct(u8) {
@@ -274,7 +278,10 @@ pub const CellText = extern struct {
     bools: packed struct(u8) {
         no_min_contrast: bool = false,
         is_cursor_glyph: bool = false,
-        _padding: u6 = 0,
+        /// Stretch this sprite to the width of its cell(s) when cells
+        /// have their own x positions (cursor, underline, and so on).
+        stretch: bool = false,
+        _padding: u5 = 0,
     } align(1) = .{},
 
     pub const Atlas = enum(u8) {

@@ -23,5 +23,13 @@ Run the demo: `macos/build/Debug/Ghostty.app/Contents/MacOS/ghostty
 Neue` and `font-proportional-layout = true`.
 
 ## Milestone 2 — backgrounds, selection highlight, block cursor
+- [x] `cell_x` GPU buffer + `proportional` uniform; background shader per-row lookup
+- [x] Stretch cursor (block/hollow/underline) and underline/strike/overline sprites
+      to their cells, 3-slice so borders keep thickness, exact edges so no gaps
+- [x] Screenshots: SGR backgrounds, reverse video, decorations, hollow cursor on `i`
+- [ ] Selection highlight not exercised live (same per-cell bg path; driving a
+      selection needs mouse mapping from milestone 3 or AppleScript permission)
+- [ ] OpenGL/GLSL not updated; Linux cross-build fails in upstream egl.zig, so the
+      generic code wasn't compile-checked against OpenGL
 ## Milestone 3 — mouse (selection, reporting, links)
 ## Milestone 4 — decoration widths, IME rect, polish
