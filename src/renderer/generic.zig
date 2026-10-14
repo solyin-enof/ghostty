@@ -46,6 +46,11 @@ const DisplayLink = switch (builtin.os.tag) {
 
 const log = std.log.scoped(.generic_renderer);
 
+/// Rows captured above and below the viewport for proportional layout, so
+/// a table's columns are aligned using rows scrolled out of view too and
+/// don't move while it scrolls (unless it's taller than this window).
+const proportional_overscan = 128;
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -178,11 +183,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         cells_rebuilt: bool = false,
 
         /// Proportional layout (see `font-proportional-layout`). `x` holds
-        /// every cell's left edge in pixels, `cols + 1` per row, and is
-        /// empty when the layout isn't in use. The row and cell buffers
-        /// are only kept to avoid reallocating every frame.
+        /// every cell's left edge in pixels, `cols + 1` per row, for every
+        /// captured row including the overscan above and below the viewport,
+        /// and is empty when the layout isn't in use. The viewport starts
+        /// `proportional_top` rows in. The row and cell buffers are only
+        /// kept to avoid reallocating every frame.
         proportional_x: std.ArrayList(f32) = .empty,
         proportional_cols: usize = 0,
+        proportional_top: usize = 0,
         proportional_rows: std.ArrayList(proportional.Row) = .empty,
         proportional_cells: std.ArrayList(proportional.Cell) = .empty,
 
@@ -1441,6 +1449,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
+                // Proportional layout aligns tables across rows, including
+                // rows scrolled out of view, so columns don't move as a
+                // table scrolls. Capture rows around the viewport for it.
+                self.terminal_state.overscan_request = if (self.config.font_proportional_layout)
+                    .{ .above = proportional_overscan, .below = proportional_overscan }
+                else
+                    .{};
+
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
@@ -1869,7 +1885,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Setup our frame data
             try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
-            try frame.cell_x.sync(self.proportional_x.items);
+            try frame.cell_x.sync(self.proportionalViewportX());
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
 
             // If our background image buffer has changed, sync it.
@@ -2648,10 +2664,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // a change to any row can move the others: rebuild them all.
             const proportional_active = self.config.font_proportional_layout and
                 state.screen == .primary;
+            const captured = state.rowDataRange();
             const rebuild = state.dirty == .full or grid_size_diff or
                 (proportional_active and std.mem.indexOfScalar(
                     bool,
-                    state.row_data.items(.dirty),
+                    state.row_data.items(.dirty)[captured.start..captured.end],
                     true,
                 ) != null);
 
@@ -2691,13 +2708,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // working terminal state, even if incorrect.
             errdefer comptime unreachable;
 
-            // Get our row data from our state
+            // Get our row data from our state, starting at the viewport
+            // (rows above it are overscan, used only for layout).
+            const vp = state.viewportStart();
             const row_data = state.row_data.slice();
-            const row_raws = row_data.items(.raw);
-            const row_cells = row_data.items(.cells);
-            const row_dirty = row_data.items(.dirty);
-            const row_selection = row_data.items(.selection);
-            const row_highlights = row_data.items(.highlights);
+            const row_raws = row_data.items(.raw)[vp..];
+            const row_cells = row_data.items(.cells)[vp..];
+            const row_dirty = row_data.items(.dirty)[vp..];
+            const row_selection = row_data.items(.selection)[vp..];
+            const row_highlights = row_data.items(.highlights)[vp..];
 
             // If our cell contents buffer is shorter than the screen viewport,
             // we render the rows that fit, starting from the bottom. If instead
@@ -2786,8 +2805,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // need it for styling.
                 const cursor_vp = state.cursor.viewport orelse break :cursor;
                 const cursor_style: terminal.Style = cursor_style: {
-                    const cells = state.row_data.items(.cells);
-                    const cell = cells[cursor_vp.y].get(cursor_vp.x);
+                    const cell = row_cells[cursor_vp.y].get(cursor_vp.x);
                     break :cursor_style if (cell.raw.hasStyling())
                         cell.style
                     else
@@ -2941,7 +2959,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// `proportional_x`. See `font-proportional-layout`.
         fn layoutProportional(self: *Self) !void {
             const state = &self.terminal_state;
-            const rows: usize = @min(state.rows, self.cells.size.rows);
+            const range = state.rowDataRange();
+            const rows: usize = range.end - range.start;
             const cols: usize = @min(state.cols, self.cells.size.columns);
             const cell_width: f32 = @floatFromInt(self.grid_metrics.cell_width);
 
@@ -2950,13 +2969,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try self.proportional_cells.resize(self.alloc, rows * cols);
             try self.proportional_x.resize(self.alloc, rows * (cols + 1));
             self.proportional_cols = cols;
+            self.proportional_top = state.viewportStart() - range.start;
 
             const row_data = state.row_data.slice();
             for (
-                row_data.items(.raw)[0..rows],
-                row_data.items(.cells)[0..rows],
+                row_data.items(.raw)[range.start..range.end],
+                row_data.items(.cells)[range.start..range.end],
+                row_data.items(.dirty)[range.start..range.end],
                 0..,
-            ) |row, *cells, y| {
+            ) |row, *cells, *dirty, y| {
+                // Overscan rows are never drawn, so nothing else clears
+                // their dirty flag; the layout has now seen them.
+                const vp_y = y -% self.proportional_top;
+                if (vp_y >= state.rows) dirty.* = false;
+
                 const out = self.proportional_cells.items[y * cols ..][0..cols];
                 try self.measureRow(cells, out, cell_width);
                 self.proportional_rows.appendAssumeCapacity(.{
@@ -3027,11 +3053,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Pixel offset that moves cell (x, y) from its grid position to
         /// its proportional position, or 0 when the layout isn't in use.
         fn proportionalShift(self: *const Self, x: usize, y: usize) i32 {
-            const xs = self.proportional_x.items;
+            const xs = self.proportionalViewportX();
             const stride = self.proportional_cols + 1;
             if (x >= stride or (y + 1) * stride > xs.len) return 0;
             const grid: f32 = @floatFromInt(x * self.grid_metrics.cell_width);
             return @intFromFloat(@round(xs[y * stride + x] - grid));
+        }
+
+        /// The proportional cell positions of the viewport rows only
+        /// (empty when the layout isn't in use).
+        fn proportionalViewportX(self: *const Self) []const f32 {
+            const xs = self.proportional_x.items;
+            if (xs.len == 0) return xs;
+            const stride = self.proportional_cols + 1;
+            const start = @min(xs.len, self.proportional_top * stride);
+            const len = @min(xs.len - start, self.terminal_state.rows * stride);
+            return xs[start..][0..len];
         }
 
         fn rebuildRow(

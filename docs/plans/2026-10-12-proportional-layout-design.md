@@ -119,8 +119,17 @@ work.)
    `x_map` (renderer thread builds it, app thread reads it: needs a handoff).
 4. Decoration widths (underline length), IME rect, config polish.
 
+**Scroll stability.** Laying out only the visible rows made columns jump
+while scrolling: a table's column sits past its widest *visible* entry, and
+that changes as rows scroll in (reported with `ls` in a home directory). The
+renderer now requests 128 rows of overscan above and below the viewport while
+the flag is on and lays out every captured row, drawing only the viewport.
+Tables up to ~250 rows taller than the window stay put; overscan rows' dirty
+flags are cleared after layout since nothing else draws them.
+
 Later: kitty images on the primary screen, overflow compression, streaming
-stability (columns can jump while output arrives).
+stability (columns can still move while output arrives), incremental layout
+(every dirty frame currently re-lays out all captured rows).
 
 ## Testing
 

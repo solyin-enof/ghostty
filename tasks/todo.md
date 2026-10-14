@@ -31,5 +31,11 @@ Neue` and `font-proportional-layout = true`.
       selection needs mouse mapping from milestone 3 or AppleScript permission)
 - [ ] OpenGL/GLSL not updated; Linux cross-build fails in upstream egl.zig, so the
       generic code wasn't compile-checked against OpenGL
+
+## Fixes from trying it
+- [x] Columns jumped while scrolling (`ls` in ~): lay out 128 rows of overscan
+      above/below the viewport; verified with a table whose widest name is
+      scrolled off
+
 ## Milestone 3 — mouse (selection, reporting, links)
 ## Milestone 4 — decoration widths, IME rect, polish
