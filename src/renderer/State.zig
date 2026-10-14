@@ -9,6 +9,7 @@ const Inspector = @import("../inspector/main.zig").Inspector;
 const terminalpkg = @import("../terminal/main.zig");
 const inputpkg = @import("../input.zig");
 const renderer = @import("../renderer.zig");
+const proportional = @import("proportional.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
@@ -32,6 +33,11 @@ preedit: ?Preedit = null,
 /// Mouse state. This only contains state relevant to what renderers
 /// need about the mouse.
 mouse: Mouse = .{},
+
+/// Where the renderer last drew each cell when proportional layout is on,
+/// so pointer positions can be mapped back onto the grid. Unlike the other
+/// members this is NOT protected by `mutex`; it has its own lock.
+cell_x: proportional.SharedMap = .{},
 
 /// The number of threads currently waiting to acquire `mutex` via
 /// `lockDemand`. This is not protected by the mutex; it is read by

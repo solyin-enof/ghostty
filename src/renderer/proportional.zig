@@ -222,6 +222,72 @@ pub fn layout(
     }
 }
 
+/// Map `x`, in pixels from the left edge of a row whose cell edges are
+/// `xs` (`cols + 1` entries, as written by `layout`), to the matching x on
+/// a grid of uniform `cell_width` cells: same cell, same fraction across
+/// it. Pointer handling (cell lookup, selection thresholds, mouse
+/// reporting) can then keep assuming a uniform grid. Positions left of the
+/// row are unchanged; past the row's end they continue at one pixel per
+/// pixel after the last cell.
+pub fn gridX(xs: []const f32, x: f64, cell_width: f64) f64 {
+    assert(xs.len >= 2);
+    const cols = xs.len - 1;
+    if (x < 0) return x;
+    const end: f64 = xs[cols];
+    if (x >= end) return @as(f64, @floatFromInt(cols)) * cell_width + (x - end);
+
+    // Last cell starting at or before x; zero-width cells are skipped.
+    var lo: usize = 0;
+    var hi: usize = cols - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) / 2;
+        if (xs[mid] <= x) lo = mid else hi = mid - 1;
+    }
+    const left: f64 = xs[lo];
+    const width: f64 = xs[lo + 1] - left;
+    const frac = if (width > 0) (x - left) / width else 0;
+    return (@as(f64, @floatFromInt(lo)) + frac) * cell_width;
+}
+
+/// The cell positions of the last drawn frame, shared from the renderer
+/// (which writes them) to the surface (which maps pointer positions with
+/// them). It has its own lock, separate from the terminal's. Empty when
+/// proportional layout isn't in use.
+pub const SharedMap = struct {
+    mutex: std.Io.Mutex = .init,
+    xs: std.ArrayList(f32) = .empty,
+    cols: usize = 0,
+
+    pub fn deinit(self: *SharedMap, alloc: Allocator) void {
+        self.xs.deinit(alloc);
+    }
+
+    /// Replace the map with `xs`: `cols + 1` entries per viewport row, or
+    /// empty to turn mapping off.
+    pub fn publish(
+        self: *SharedMap,
+        alloc: Allocator,
+        io: std.Io,
+        xs: []const f32,
+        cols: usize,
+    ) Allocator.Error!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.xs.clearRetainingCapacity();
+        try self.xs.appendSlice(alloc, xs);
+        self.cols = cols;
+    }
+
+    /// `gridX` for viewport `row`, or `x` unchanged if there's no map.
+    pub fn toGrid(self: *SharedMap, io: std.Io, row: usize, x: f64, cell_width: f64) f64 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const stride = self.cols + 1;
+        if (self.cols == 0 or (row + 1) * stride > self.xs.items.len) return x;
+        return gridX(self.xs.items[row * stride ..][0..stride], x, cell_width);
+    }
+};
+
 const Alignment = enum { none, left, right };
 
 const Word = struct {
@@ -744,4 +810,47 @@ test "rows marked not to couple are left alone" {
 
 test "empty input" {
     try layout(testing.allocator, &.{}, test_cell_width, &.{});
+}
+
+test "gridX keeps the cell and the fraction across it" {
+    // Cells 3, 7, 12, 0 (a wide char's spacer) and 8 pixels wide, on a
+    // 12 pixel grid.
+    const xs = [_]f32{ 0, 3, 10, 22, 22, 30 };
+    const cw: f64 = 12;
+
+    // A quarter of the way into the 7px cell is a quarter into grid cell 1:
+    // selection decides whether to include a cell by this fraction.
+    try testing.expectApproxEqAbs(@as(f64, 12 + 3), gridX(&xs, 3 + 1.75, cw), 0.001);
+    try testing.expectEqual(@as(f64, 0), gridX(&xs, 0, cw));
+
+    // The zero-width cell is never under the pointer.
+    try testing.expectEqual(@as(f64, 4 * 12), gridX(&xs, 22, cw));
+
+    // Past the end of the row and left of it.
+    try testing.expectEqual(@as(f64, 5 * 12 + 5), gridX(&xs, 35, cw));
+    try testing.expectEqual(@as(f64, -4), gridX(&xs, -4, cw));
+}
+
+test "gridX is the identity on a uniform grid" {
+    const xs = [_]f32{ 0, 12, 24, 36 };
+    for ([_]f64{ 0, 5.5, 12, 23.9, 30, 40 }) |x| {
+        try testing.expectApproxEqAbs(x, gridX(&xs, x, 12), 0.001);
+    }
+}
+
+test "SharedMap maps per row and passes through without a map" {
+    var map: SharedMap = .{};
+    defer map.deinit(testing.allocator);
+    const io = testing.io;
+
+    // No map yet: unchanged.
+    try testing.expectEqual(@as(f64, 17), map.toGrid(io, 0, 17, 12));
+
+    // Two rows of two cells: row 0 is narrow, row 1 is uniform.
+    try map.publish(testing.allocator, io, &.{ 0, 4, 8, 0, 12, 24 }, 2);
+    try testing.expectEqual(@as(f64, 18), map.toGrid(io, 0, 6, 12));
+    try testing.expectEqual(@as(f64, 6), map.toGrid(io, 1, 6, 12));
+
+    // Rows past the map pass through.
+    try testing.expectEqual(@as(f64, 6), map.toGrid(io, 2, 6, 12));
 }

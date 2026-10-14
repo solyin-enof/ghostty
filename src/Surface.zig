@@ -839,6 +839,7 @@ pub fn deinit(self: *Surface) void {
 
     // Clean up our render state
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
+    self.renderer_state.cell_x.deinit(self.alloc);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
 
@@ -1221,7 +1222,7 @@ fn selectionScrollTick(self: *Surface) !void {
         return;
     }
 
-    const pos = try self.rt_surface.getCursorPos();
+    const pos = try self.cursorPos();
     const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // We need our locked state for the remainder
@@ -2831,7 +2832,7 @@ pub fn keyCallback(
             (self.mouse.mods.shift and !self.mouseShiftCapture(false)))
         {
             // Refresh our link state
-            const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
+            const pos = self.cursorPos() catch break :mouse_mods;
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             self.mouseRefreshLinks(
@@ -3690,7 +3691,7 @@ pub fn scrollCallback(
         // If we're scrolling up or down, then send a mouse event.
         if (self.isMouseReporting()) {
             for (0..@abs(y.delta)) |_| {
-                const pos = try self.rt_surface.getCursorPos();
+                const pos = try self.cursorPos();
                 self.mouseReport(switch (y.direction()) {
                     .up_right => .four,
                     .down_left => .five,
@@ -3698,7 +3699,7 @@ pub fn scrollCallback(
             }
 
             for (0..@abs(x.delta)) |_| {
-                const pos = try self.rt_surface.getCursorPos();
+                const pos = try self.cursorPos();
                 self.mouseReport(switch (x.direction()) {
                     .up_right => .six,
                     .down_left => .seven,
@@ -3934,7 +3935,7 @@ pub fn mouseButtonCallback(
                 break :extend_selection;
             }
 
-            const pos = try self.rt_surface.getCursorPos();
+            const pos = try self.cursorPos();
             try self.cursorPosCallback(pos, null);
             return true;
         }
@@ -3948,7 +3949,7 @@ pub fn mouseButtonCallback(
         // comparing the release cell to the original press cell. Resolve the
         // release position and pin before notifying the gesture so later
         // release handling can query that state.
-        const release_pos: ?apprt.CursorPos = self.rt_surface.getCursorPos() catch |err| pos: {
+        const release_pos: ?apprt.CursorPos = self.cursorPos() catch |err| pos: {
             log.warn("error reading cursor position for mouse release err={}", .{err});
             break :pos null;
         };
@@ -3997,7 +3998,7 @@ pub fn mouseButtonCallback(
         if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
             // We are holding the renderer lock, but this should just be
             // a cached value.
-            const pos = release_pos orelse try self.rt_surface.getCursorPos();
+            const pos = release_pos orelse try self.cursorPos();
             if (self.processLinks(pos)) |processed| {
                 if (processed) return true;
             } else |err| {
@@ -4034,7 +4035,7 @@ pub fn mouseButtonCallback(
             // suddenly start selecting text.
             self.mouse.selection_gesture.reset(self.renderer_state.terminal);
 
-            const pos = try self.rt_surface.getCursorPos();
+            const pos = try self.cursorPos();
 
             const report_action: input.MouseAction = switch (action) {
                 .press => .press,
@@ -4062,7 +4063,7 @@ pub fn mouseButtonCallback(
         const t: *terminal.Terminal = self.renderer_state.terminal;
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
 
-        const pos = try self.rt_surface.getCursorPos();
+        const pos = try self.cursorPos();
         const pin = pin: {
             const pt_viewport = self.posToViewport(pos.x, pos.y);
             const pin = screen.pages.pin(.{
@@ -4162,7 +4163,7 @@ pub fn mouseButtonCallback(
 
         // Get our viewport pin
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
-        const pos = try self.rt_surface.getCursorPos();
+        const pos = try self.cursorPos();
         const pin = pin: {
             const pt_viewport = self.posToViewport(pos.x, pos.y);
             const pin = screen.pages.pin(.{
@@ -4282,7 +4283,7 @@ fn maybePromptClick(self: *Surface) !bool {
     if (screen.selection != null) return false;
 
     // Get the pin for our mouse click.
-    const pos = try self.rt_surface.getCursorPos();
+    const pos = try self.cursorPos();
     const pos_vp = self.posToViewport(pos.x, pos.y);
     const click_pin: terminal.Pin = pin: {
         const pin = screen.pages.pin(.{
@@ -4634,12 +4635,14 @@ pub fn mousePressureCallback(
 /// do receive mouse events so we have to rely on updated mods.
 pub fn cursorPosCallback(
     self: *Surface,
-    pos: apprt.CursorPos,
+    screen_pos: apprt.CursorPos,
     mods: ?input.Mods,
 ) !void {
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
+
+    const pos = self.gridCursorPos(screen_pos);
 
     // log.debug("cursor pos x={} y={} mods={?}", .{ pos.x, pos.y, mods });
 
@@ -4844,6 +4847,38 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 
     // If mode 2031 is on, then we report the change live.
     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
+}
+
+/// The pointer position from the apprt, mapped onto the grid; see
+/// `gridCursorPos`.
+fn cursorPos(self: *Surface) !apprt.CursorPos {
+    return self.gridCursorPos(try self.rt_surface.getCursorPos());
+}
+
+/// With proportional layout (`font-proportional-layout`) cells aren't
+/// drawn where the uniform grid would put them. Map a pointer position
+/// from where cells are drawn to where they would be on the grid, keeping
+/// the fraction across the cell, so everything downstream (cell lookup,
+/// selection, mouse reporting, links) can keep assuming uniform cells.
+/// Without proportional layout this returns `pos` unchanged.
+fn gridCursorPos(self: *Surface, pos: apprt.CursorPos) apprt.CursorPos {
+    const padding_left: f64 = @floatFromInt(self.size.padding.left);
+    const padding_top: f64 = @floatFromInt(self.size.padding.top);
+    const cell_width: f64 = @floatFromInt(self.size.cell.width);
+    const cell_height: f64 = @floatFromInt(self.size.cell.height);
+    const rows = self.size.grid().rows;
+    const y = @as(f64, pos.y) - padding_top;
+    const row: usize = if (y <= 0 or rows == 0)
+        0
+    else
+        @min(rows - 1, @as(usize, @intFromFloat(y / cell_height)));
+    const x = self.renderer_state.cell_x.toGrid(
+        global.io(),
+        row,
+        @as(f64, pos.x) - padding_left,
+        cell_width,
+    );
+    return .{ .x = @floatCast(x + padding_left), .y = pos.y };
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
@@ -5145,7 +5180,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         .copy_url_to_clipboard => {
             // If the mouse isn't over a link, nothing we can do.
             if (!self.mouse.over_link) return false;
-            const pos = try self.rt_surface.getCursorPos();
+            const pos = try self.cursorPos();
 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());

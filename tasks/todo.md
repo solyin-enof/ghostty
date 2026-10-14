@@ -38,4 +38,12 @@ Neue` and `font-proportional-layout = true`.
       scrolled off
 
 ## Milestone 3 — mouse (selection, reporting, links)
+- [x] `proportional.gridX` + `SharedMap` (own lock), unit-tested
+- [x] Renderer publishes viewport cell positions into `renderer.State.cell_x`
+- [x] Surface maps every pointer position onto the grid on entry
+      (`cursorPos()` for the 12 `getCursorPos()` calls, `cursorPosCallback`),
+      so cell lookup, selection thresholds, mouse reporting and links are unchanged
+- [ ] Live check of click/drag selection: background click injection doesn't
+      move Ghostty's cursor position, so this needs a real mouse (user)
+- [ ] Reverse direction (grid -> pixels): IME rect, QuickLook origin (milestone 4)
 ## Milestone 4 — decoration widths, IME rect, polish

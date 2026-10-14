@@ -191,6 +191,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         proportional_x: std.ArrayList(f32) = .empty,
         proportional_cols: usize = 0,
         proportional_top: usize = 0,
+
+        /// Set when `proportional_x` changed and should be published to
+        /// the surface for pointer mapping.
+        proportional_publish: bool = false,
         proportional_rows: std.ArrayList(proportional.Row) = .empty,
         proportional_cells: std.ArrayList(proportional.Cell) = .empty,
 
@@ -1674,6 +1678,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     log.warn("error rebuilding GPU cells err={}", .{err});
                 };
 
+                // Share where cells were drawn so the surface can map the
+                // pointer onto the grid.
+                if (self.proportional_publish) {
+                    self.proportional_publish = false;
+                    state.cell_x.publish(
+                        self.alloc,
+                        global.io(),
+                        self.proportionalViewportX(),
+                        self.proportional_cols,
+                    ) catch |err| {
+                        log.warn("error publishing proportional layout err={}", .{err});
+                    };
+                }
+
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
                 // This is pretty fast.
@@ -2673,8 +2691,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 ) != null);
 
             if (!proportional_active) {
+                if (self.proportional_x.items.len > 0) self.proportional_publish = true;
                 self.proportional_x.clearRetainingCapacity();
             } else if (rebuild) {
+                self.proportional_publish = true;
                 self.layoutProportional() catch |err| {
                     // Fall back to the grid for this frame.
                     log.warn("error in proportional layout err={}", .{err});
