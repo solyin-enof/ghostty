@@ -46,8 +46,9 @@ Neue` and `font-proportional-layout = true`.
       are squeezed to fit. Prose now wraps at ~80%.
 - [x] Cursor-positioned (never-written-gap) words keep their grid column;
       aligned columns get a one-cell gap (top was tight with "0" cells)
-- [ ] htop header: Mem/Swp rows (written spaces) don't couple with the CPU
-      meter table, so Tasks/Load/Uptime don't line up; left as is
+- [x] htop header: meter bars (runs of `|`) keep one cell per character, and
+      on the alternate screen jumped-to values keep their column; meters,
+      values and Tasks/Load line up (Uptime within ~1 cell)
 
 ## Milestone 3 — mouse (selection, reporting, links)
 - [x] `proportional.gridX` + `SharedMap` (own lock), unit-tested
@@ -55,7 +56,7 @@ Neue` and `font-proportional-layout = true`.
 - [x] Surface maps every pointer position onto the grid on entry
       (`cursorPos()` for the 12 `getCursorPos()` calls, `cursorPosCallback`),
       so cell lookup, selection thresholds, mouse reporting and links are unchanged
-- [ ] Live check of click/drag selection: background click injection doesn't
-      move Ghostty's cursor position, so this needs a real mouse (user)
+- [x] Live check of click/drag selection: confirmed working by the user
+      (background click injection couldn't drive it)
 - [ ] Reverse direction (grid -> pixels): IME rect, QuickLook origin (milestone 4)
 ## Milestone 4 — decoration widths, IME rect, polish

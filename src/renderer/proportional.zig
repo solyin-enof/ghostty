@@ -48,6 +48,13 @@ pub const Row = struct {
     /// False for rows that must never align with their neighbors, such
     /// as shell prompt and input rows.
     couple: bool = true,
+
+    /// Words the program moved the cursor to keep their grid column even
+    /// when they're aligned in a table. Full-screen programs lay out with
+    /// cursor movement (htop jumps to where each meter's value goes); on
+    /// the normal screen never-written cells are mostly tabs, and
+    /// tab-separated columns should compact like any other.
+    anchor_jumps: bool = false,
 };
 
 /// Fraction of word edges two adjacent rows must share to be treated as
@@ -248,10 +255,13 @@ pub fn layout(
 
                 // A word the program moved the cursor to keeps its grid
                 // column (unless it's aligned in a table, where columns
-                // compact): full-screen programs lay out regions this way,
-                // like htop's two-column header.
-                if (w.after_jump and w.alignment == .none) {
-                    req = @max(req, @as(f32, @floatFromInt(w.l)) * cell_width);
+                // compact, and the row doesn't anchor jumps): full-screen
+                // programs lay out regions this way, like htop's header.
+                if (w.after_jump and (w.alignment == .none or rows[y].anchor_jumps)) {
+                    req = @max(req, if (w.alignment == .right)
+                        @as(f32, @floatFromInt(w.r + 1)) * cell_width - w.width
+                    else
+                        @as(f32, @floatFromInt(w.l)) * cell_width);
                 }
 
                 pos[i] = switch (w.alignment) {
@@ -332,6 +342,36 @@ pub fn layout(
         const k = (limit - end) / (o[cols] - end);
         for (o[after..]) |*v| v.* = end + (v.* - end) * k;
     }
+}
+
+/// Give each cell in a run of at least `graphic_run` repeats of the same
+/// symbol one full cell width. Such runs are graphics whose length the
+/// program measured in cells: htop's `|||` meter bars, `[####----]`
+/// progress bars, `-----` and `=====` rules under table headers. At the
+/// symbols' natural width a full meter would cover half its track. Letters,
+/// digits, whitespace and punctuation that repeats in prose (`...`, `,,`)
+/// are never graphics. `codepoints` holds each cell's (first) codepoint.
+pub fn widenGraphicRuns(codepoints: []const u21, cells: []Cell, cell_width: f32) void {
+    assert(codepoints.len == cells.len);
+    var start: usize = 0;
+    while (start < cells.len) {
+        var end = start + 1;
+        while (end < cells.len and codepoints[end] == codepoints[start]) end += 1;
+        defer start = end;
+        if (end - start < graphic_run or !isGraphic(codepoints[start])) continue;
+        for (cells[start..end]) |*c| {
+            if (c.kind == .text) c.advance = cell_width;
+        }
+    }
+}
+
+const graphic_run = 3;
+
+fn isGraphic(cp: u21) bool {
+    return switch (cp) {
+        '0'...'9', 'a'...'z', 'A'...'Z', ' ', '.', ',', 0 => false,
+        else => cp < 0x80 or (cp >= 0x2500 and cp <= 0x25FF),
+    };
 }
 
 /// Map `x`, in pixels from the left edge of a row whose cell edges are
@@ -615,7 +655,8 @@ fn mode(ws: []const Word, members: []const u32, comptime side: []const u8) struc
 //
 // Fixtures are real command output captured on macOS (uid/gid numeric).
 // `~` marks a TAB, which a terminal turns into never-written cells up to
-// the next multiple of 8. Metrics are fake and deliberately uneven so a
+// the next multiple of 8, and a backquote marks one never-written cell
+// (the cursor moved past it). Metrics are fake and deliberately uneven so a
 // test fails the moment alignment stops happening: 'i' is 3px, 'W' is
 // 12px, a space is 3px, everything else is 7px, and a cell is 12px.
 
@@ -662,6 +703,8 @@ const Fixture = struct {
                 if (c == '~') {
                     try line.append(alloc, 0);
                     while (line.items.len % 8 != 0) try line.append(alloc, 0);
+                } else if (c == '`') {
+                    try line.append(alloc, 0);
                 } else try line.append(alloc, c);
             }
             cols = @max(cols, line.items.len);
@@ -1121,6 +1164,34 @@ test "cursor-positioned text keeps its grid column" {
     try testing.expectApproxEqAbs(f.endX(1, "Load") + testAdvance(' '), f.startX(1, "average:"), 0.001);
 }
 
+test "htop meters: values the cursor jumped to keep their column" {
+    // htop draws a CPU meter as the bar, then jumps the cursor to where the
+    // value goes (column 45 here). On the alternate screen that column is
+    // kept even though the values also line up as a table column, so every
+    // meter's value is where the program put it; on the normal screen
+    // (where skipped cells are mostly tabs) the column compacts as usual.
+    const text =
+        \\  0[||||||||||||||||||||||||||||||||||||||||90.7%]
+        \\  4[||||`````````````````````````````````````9.2%]
+        \\  5[|||``````````````````````````````````````6.0%]
+    ;
+    for ([_]bool{ true, false }) |anchor| {
+        var f = try Fixture.init(testing.allocator, text);
+        defer f.deinit();
+        for (f.rows) |*r| r.anchor_jumps = anchor;
+        try f.run();
+        try f.expectInvariants();
+
+        try f.expectLeft(&.{ .{ 1, "9.2%]" }, .{ 2, "6.0%]" } });
+        const column: f32 = 45 * test_cell_width;
+        if (anchor) {
+            try testing.expectEqual(column, f.startX(1, "9.2%]"));
+        } else {
+            try testing.expect(f.startX(1, "9.2%]") < column);
+        }
+    }
+}
+
 test "rows marked not to couple are left alone" {
     var f = try Fixture.init(testing.allocator,
         \\MOMMY.WAV  WWWWWW.md
@@ -1179,4 +1250,22 @@ test "SharedMap maps per row and passes through without a map" {
 
     // Rows past the map pass through.
     try testing.expectEqual(@as(f64, 6), map.toGrid(io, 2, 6, 12));
+}
+
+test "runs of a repeated symbol keep one cell per character" {
+    // htop draws a meter as a run of '|' whose length is the percentage in
+    // cells; at '|'s natural width a full bar would cover half its track.
+    const text = "Mem[|||||57G]  a...b ==== ok -- xxxx";
+    var cps: [text.len]u21 = undefined;
+    var cells: [text.len]Cell = undefined;
+    for (text, &cps, &cells) |c, *cp, *cell| {
+        cp.* = c;
+        cell.* = .{ .kind = if (c == ' ') .space else .text, .advance = 3 };
+    }
+    widenGraphicRuns(&cps, &cells, 12);
+
+    for (text, cells) |c, cell| {
+        const graphic = c == '|' or c == '=';
+        try testing.expectEqual(@as(f32, if (graphic) 12 else 3), cell.advance);
+    }
 }

@@ -146,9 +146,17 @@ test when removed):
   the last column (a clock, a right prompt), keeps its grid end.
 - *Both screens.* The layout now runs on the alternate screen too: `top`,
   vim and `htop`'s process table read well; the grid with a proportional
-  font looked letter-spaced. Open issue: `htop` writes most of its header
-  with real spaces, so its Mem/Swp lines don't join the CPU-meter table and
-  `Tasks:`/`Load average:`/`Uptime:` don't line up with each other.
+  font looked letter-spaced.
+- *Graphic runs keep their cells.* Three or more of the same symbol in a
+  row (not letters, digits, spaces, `.` or `,`) are graphics measured in
+  cells: htop's `|||` meters, `[####----]`, `-----` rules. Each gets a full
+  cell (`widenGraphicRuns`, applied by the renderer while measuring); at a
+  `|`'s natural width a full meter covered half its track and shifted
+  everything after it.
+- *Jumps anchor on the alternate screen.* There, words the cursor jumped to
+  keep their grid column even when aligned in a table (htop jumps to each
+  meter's value); on the normal screen skipped cells are mostly tabs, and
+  tab-separated columns keep compacting (`Row.anchor_jumps`).
 
 **Cell width.** With the flag on, the grid's cell width is the advance of
 "0" (CSS `ch`) instead of the widest ASCII glyph, so programs get enough

@@ -197,6 +197,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         proportional_publish: bool = false,
         proportional_rows: std.ArrayList(proportional.Row) = .empty,
         proportional_cells: std.ArrayList(proportional.Cell) = .empty,
+        proportional_codepoints: std.ArrayList(u21) = .empty,
 
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
@@ -879,6 +880,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.proportional_x.deinit(self.alloc);
             self.proportional_rows.deinit(self.alloc);
             self.proportional_cells.deinit(self.alloc);
+            self.proportional_codepoints.deinit(self.alloc);
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
@@ -3009,6 +3011,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .cells = out,
                     // Prompt and input rows never align with output.
                     .couple = row.semantic_prompt == .none,
+                    // Full-screen programs lay out with cursor movement.
+                    .anchor_jumps = state.screen == .alternate,
                 });
             }
 
@@ -3068,6 +3072,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         shaper_cell.x_advance;
                 }
             }
+
+            // Bars and rules drawn with repeated symbols keep their cells.
+            try self.proportional_codepoints.resize(self.alloc, out.len);
+            for (
+                slice.items(.raw)[0..out.len],
+                self.proportional_codepoints.items,
+            ) |raw, *cp| cp.* = raw.codepoint();
+            proportional.widenGraphicRuns(self.proportional_codepoints.items, out, cell_width);
         }
 
         /// Pixel offset that moves cell (x, y) from its grid position to
