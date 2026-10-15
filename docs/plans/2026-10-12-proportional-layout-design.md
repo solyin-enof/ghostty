@@ -146,6 +146,15 @@ test when removed):
   with cursor jumps (never-written cells keep monospace width) mix
   monospace and compacted geometry, e.g. `htop`'s meters.
 
+**Cell width.** With the flag on, the grid's cell width is the advance of
+"0" (CSS `ch`) instead of the widest ASCII glyph, so programs get enough
+columns to fill the window (prose wrapped at ~60% of the window before,
+~80% after; `adjust-cell-width` still applies). This breaks the
+no-overflow invariant, so after layout a row ending past `cols *
+cell_width` squeezes every row of its table by one factor (columns stay
+aligned), and never-written cells after a row's text are fit into the
+space left so the cursor stays on screen.
+
 **Scroll stability.** Laying out only the visible rows made columns jump
 while scrolling: a table's column sits past its widest *visible* entry, and
 that changes as rows scroll in (reported with `ls` in a home directory). The

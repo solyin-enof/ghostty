@@ -388,7 +388,9 @@ language: ?[:0]const u8 = null,
 ///
 /// Programs still see a normal grid of cells; only where text is drawn
 /// changes. Backgrounds, the cursor, selection and mouse positions follow
-/// the drawn text.
+/// the drawn text. Cells are sized by the width of "0" rather than the
+/// widest glyph so lines use the window's width (`adjust-cell-width` still
+/// applies); a row of unusually wide text is squeezed to fit.
 @"font-proportional-layout": bool = false,
 
 /// What color space to use when performing alpha blending.

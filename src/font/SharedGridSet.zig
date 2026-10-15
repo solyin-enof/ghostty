@@ -175,6 +175,7 @@ fn collection(
     errdefer c.deinit(self.alloc);
     c.load_options = load_options;
     c.metric_modifiers = key.metric_modifiers;
+    c.proportional = key.proportional;
 
     // Search for fonts
     if (Discover != void) discover: {
@@ -504,6 +505,7 @@ pub const DerivedConfig = struct {
     @"adjust-box-thickness": ?Metrics.Modifier,
     @"adjust-icon-height": ?Metrics.Modifier,
     @"freetype-load-flags": font.face.FreetypeLoadFlags,
+    @"font-proportional-layout": bool,
 
     /// Initialize a DerivedConfig. The config should be either a
     /// config.Config or another DerivedConfig to clone from.
@@ -544,6 +546,7 @@ pub const DerivedConfig = struct {
             .@"adjust-box-thickness" = config.@"adjust-box-thickness",
             .@"adjust-icon-height" = config.@"adjust-icon-height",
             .@"freetype-load-flags" = if (font.face.FreetypeLoadFlags != void) config.@"freetype-load-flags" else {},
+            .@"font-proportional-layout" = config.@"font-proportional-layout",
 
             // This must be last so the arena contains all our allocations
             // from above since Zig does assignment in order.
@@ -586,6 +589,9 @@ pub const Key = struct {
     /// The freetype load flags configuration, only non-void if the
     /// freetype backend is enabled.
     freetype_load_flags: font.face.FreetypeLoadFlags = font.face.freetype_load_flags_default,
+
+    /// Cells are sized for proportional layout (see `Collection.proportional`).
+    proportional: bool = false,
 
     const style_offsets_len = std.enums.directEnumArrayLen(Style, 0);
     const StyleOffsets = [style_offsets_len]usize;
@@ -714,6 +720,7 @@ pub const Key = struct {
                 config.@"freetype-load-flags"
             else
                 font.face.freetype_load_flags_default,
+            .proportional = config.@"font-proportional-layout",
         };
     }
 
@@ -744,6 +751,7 @@ pub const Key = struct {
         self.codepoint_map.hash(hasher);
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
+        autoHash(hasher, self.proportional);
         if (self.metric_modifiers.count() > 0) {
             inline for (@typeInfo(Metrics.Key).@"enum".fields) |field| {
                 const key = @field(Metrics.Key, field.name);

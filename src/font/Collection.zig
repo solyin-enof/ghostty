@@ -43,6 +43,11 @@ faces: StyleArray,
 /// collection's metrics after making changes to these.
 metric_modifiers: Metrics.ModifierSet = .{},
 
+/// Size cells for proportional layout (`font-proportional-layout`): the
+/// cell width is the advance of "0" rather than of the widest glyph.
+/// Call `Collection.updateMetrics` after changing this.
+proportional: bool = false,
+
 /// Metrics for this collection. Call `Collection.updateMetrics` to (re)compute
 /// these after adding a primary font or making changes to `metric_modifiers`.
 metrics: ?Metrics = null,
@@ -676,7 +681,11 @@ pub fn updateMetrics(self: *Collection) UpdateMetricsError!void {
 
     self.primary_face_metrics = primary_face.getMetrics();
 
-    var metrics = Metrics.calc(self.primary_face_metrics.?);
+    var face_metrics = self.primary_face_metrics.?;
+    if (self.proportional) {
+        if (face_metrics.zero_width) |w| face_metrics.cell_width = w;
+    }
+    var metrics = Metrics.calc(face_metrics);
 
     metrics.apply(self.metric_modifiers);
 

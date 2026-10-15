@@ -770,7 +770,7 @@ pub const Face = struct {
         //
         // ASCII height is calculated as the height of the overall bounding
         // box of the same characters.
-        const cell_width: f64, const ascii_height: f64 = measurements: {
+        const cell_width: f64, const ascii_height: f64, const zero_width: f64 = measurements: {
             // Build a comptime array of all the ASCII chars
             const unichars = comptime unichars: {
                 const len = 127 - 32;
@@ -801,7 +801,7 @@ pub const Face = struct {
             // Get the overall bounding rect for the glyphs
             const rect = ct_font.getBoundingRectsForGlyphs(.horizontal, &glyphs, null);
 
-            break :measurements .{ max, rect.size.height };
+            break :measurements .{ max, rect.size.height, advances['0' - 32].width };
         };
 
         // Measure "水" (CJK water ideograph, U+6C34) for our ic width.
@@ -847,6 +847,7 @@ pub const Face = struct {
 
         return .{
             .px_per_em = px_per_em,
+            .zero_width = if (zero_width > 0) zero_width else null,
 
             .cell_width = cell_width,
 
@@ -995,6 +996,37 @@ test {
             face.glyphIndex(i).?,
             .{ .grid_metrics = font.Metrics.calc(face.getMetrics()) },
         );
+    }
+}
+
+test "zero width is the advance of 0, narrower than the widest glyph" {
+    const testing = std.testing;
+
+    // Proportional layout sizes cells by "0". In a proportional font that
+    // must be narrower than the widest ASCII glyph (or lines would wrap
+    // short of the window); in a monospace font they're the same.
+    for ([_]struct { []const u8, bool }{
+        .{ "Helvetica Neue", true },
+        .{ "Menlo", false },
+    }) |case| {
+        const name = try macos.foundation.String.createWithBytes(case[0], .utf8, false);
+        defer name.release();
+        const desc = try macos.text.FontDescriptor.createWithNameAndSize(name, 12);
+        defer desc.release();
+        const ct_font = try macos.text.Font.createWithFontDescriptor(desc, 12);
+        defer ct_font.release();
+
+        var face = try Face.initFontCopy(ct_font, .{ .size = .{ .points = 12 } });
+        defer face.deinit();
+
+        const metrics = face.getMetrics();
+        const zero = metrics.zero_width.?;
+        try testing.expect(zero > 0);
+        if (case[1]) {
+            try testing.expect(zero < metrics.cell_width * 0.8);
+        } else {
+            try testing.expectApproxEqAbs(metrics.cell_width, zero, 0.01);
+        }
     }
 }
 

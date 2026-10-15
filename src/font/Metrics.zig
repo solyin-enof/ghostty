@@ -83,6 +83,12 @@ pub const FaceMetrics = struct {
     /// Determined by measuring all printable glyphs in the ASCII range.
     cell_width: f64,
 
+    /// The advance of "0" (the CSS `ch` unit), if the face has one. With
+    /// proportional layout this is the cell width instead: in a
+    /// proportional font the widest glyph is far wider than most, and a
+    /// grid of that width leaves lines wrapping well short of the window.
+    zero_width: ?f64 = null,
+
     /// The typographic ascent metric from the font.
     /// This represents the maximum vertical position of the highest ascender.
     ///

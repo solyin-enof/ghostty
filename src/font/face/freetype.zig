@@ -971,11 +971,12 @@ pub const Face = struct {
         // If we fail to load any visible ASCII we just use max_advance from
         // the metrics provided by FreeType, and set ascii_height to null as
         // it's optional.
-        const cell_width: f64, const ascii_height: ?f64 = measurements: {
+        const cell_width: f64, const ascii_height: ?f64, const zero_width: ?f64 = measurements: {
             self.ft_mutex.lockUncancelable(global.io());
             defer self.ft_mutex.unlock(global.io());
 
             var max: f64 = 0.0;
+            var zero: ?f64 = null;
             var top: f64 = 0.0;
             var bottom: f64 = 0.0;
             var c: u8 = ' ';
@@ -987,6 +988,7 @@ pub const Face = struct {
                             f26dot6ToF64(glyph.*.advance.x),
                             max,
                         );
+                        if (c == '0') zero = f26dot6ToF64(glyph.*.advance.x);
                         const rect = getGlyphSize(glyph);
                         top = @max(rect.y + rect.height, top);
                         bottom = @min(rect.y, bottom);
@@ -1007,7 +1009,7 @@ pub const Face = struct {
                 break :rect_height estimate;
             };
 
-            break :measurements .{ max, rect_height };
+            break :measurements .{ max, rect_height, zero };
         };
 
         // We use the cap and ex heights specified by the font if they're
@@ -1085,6 +1087,7 @@ pub const Face = struct {
             .px_per_em = px_per_em,
 
             .cell_width = cell_width,
+            .zero_width = zero_width,
 
             .ascent = ascent,
             .descent = descent,

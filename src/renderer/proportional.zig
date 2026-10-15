@@ -293,6 +293,34 @@ pub fn layout(
         }
         o[cols] = cur;
     }
+
+    // Cells can be narrower than the widest glyphs (a proportional font's
+    // cells are sized by "0"), so a row can end past the grid. Squeeze
+    // every row of such a row's table by the same factor so it fits and
+    // its columns stay aligned. Then fit the never-written cells after
+    // each row's text into what's left, so the cursor stays on screen.
+    const limit = @as(f32, @floatFromInt(cols)) * cell_width;
+    const squeeze = try arena.alloc(f32, rows.len);
+    @memset(squeeze, 1);
+    for (0..rows.len) |y| {
+        if (row_start[y] == row_start[y + 1]) continue;
+        const last = row_start[y + 1] - 1;
+        const end = pos[last] + ws[last].width;
+        if (end > limit) squeeze[table[y]] = @min(squeeze[table[y]], limit / end);
+    }
+    for (0..rows.len) |y| {
+        const o = out[y * stride ..][0..stride];
+        const f = squeeze[table[y]];
+        if (f < 1) for (o) |*v| {
+            v.* *= f;
+        };
+        if (o[cols] <= limit) continue;
+        const after: usize = if (row_start[y] == row_start[y + 1]) 0 else ws[row_start[y + 1] - 1].r + 1;
+        const end = o[after];
+        if (end >= limit) continue;
+        const k = (limit - end) / (o[cols] - end);
+        for (o[after..]) |*v| v.* = end + (v.* - end) * k;
+    }
 }
 
 /// Map `x`, in pixels from the left edge of a row whose cell edges are
@@ -665,7 +693,11 @@ const Fixture = struct {
     }
 
     fn run(self: *Fixture) !void {
-        try layout(self.alloc, self.rows, test_cell_width, self.out);
+        try self.runWith(test_cell_width);
+    }
+
+    fn runWith(self: *Fixture, cell_width: f32) !void {
+        try layout(self.alloc, self.rows, cell_width, self.out);
     }
 
     fn x(self: *const Fixture, row: usize, col: usize) f32 {
@@ -723,7 +755,11 @@ const Fixture = struct {
 
     /// Positions never go backwards and no row ends past its monospace end.
     fn expectInvariants(self: *const Fixture) !void {
-        const limit = @as(f32, @floatFromInt(self.cols)) * test_cell_width;
+        try self.expectInvariantsWith(test_cell_width);
+    }
+
+    fn expectInvariantsWith(self: *const Fixture, cell_width: f32) !void {
+        const limit = @as(f32, @floatFromInt(self.cols)) * cell_width;
         for (0..self.rows.len) |row| {
             for (0..self.cols) |col| try testing.expect(self.x(row, col) <= self.x(row, col + 1));
             try testing.expect(self.x(row, self.cols) <= limit + 0.001);
@@ -1028,6 +1064,23 @@ test "top: aligned columns get a gap, the clock stays at the right edge" {
     // The clock was padded out to the last column, so it stays there.
     const grid_width = @as(f32, @floatFromInt(f.cols)) * test_cell_width;
     try testing.expectApproxEqAbs(grid_width, f.endX(0, "18:02:12"), 0.001);
+}
+
+test "rows wider than the grid are squeezed to fit, columns intact" {
+    // Proportional fonts get cells sized by "0", narrower than the widest
+    // glyphs, so a row of wide glyphs can end past the grid. Here a cell
+    // is 7px and 'W' is 12px.
+    var f = try Fixture.initPadded(testing.allocator,
+        \\WWWWWWWW  a
+        \\iiii      b
+    , 0);
+    defer f.deinit();
+    try f.runWith(7);
+
+    try f.expectInvariantsWith(7);
+    try f.expectLeft(&.{ .{ 0, "a" }, .{ 1, "b" } });
+    const limit = @as(f32, @floatFromInt(f.cols)) * 7;
+    try testing.expectApproxEqAbs(limit, f.endX(0, "a"), 0.001);
 }
 
 test "rows marked not to couple are left alone" {

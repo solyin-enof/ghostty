@@ -41,6 +41,9 @@ Neue` and `font-proportional-layout = true`.
       runs on both screens
 - [x] vim tore prose in coupled rows: identical-prefix, edge-only links,
       coverage, natural unaligned gaps; `top` column gap + flush-right clock
+- [x] Lines wrapped at ~60% of the window: with the flag, cells are sized by
+      "0" (FaceMetrics.zero_width, CoreText + FreeType); overflowing tables
+      are squeezed to fit. Prose now wraps at ~80%.
 - [ ] htop meters: cursor-positioned text keeps monospace geometry next to
       compacted text (design question: how should never-written cells size?)
 
