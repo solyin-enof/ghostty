@@ -381,15 +381,14 @@ language: ?[:0]const u8 = null,
 /// Available since: 1.2.0
 @"font-shaping-break": FontShapingBreak = .{},
 
-/// Draw text on the primary screen at each glyph's natural width, for
-/// use with proportional (variable-width) fonts. Columns that programs
-/// line up with padding, such as the output of `ls`, `ps`, `df`, or
-/// `git status`, stay aligned. The alternate screen, used by full-screen
-/// programs such as editors and pagers, keeps the normal grid.
+/// Draw text at each glyph's natural width, for use with proportional
+/// (variable-width) fonts. Columns that programs line up with padding,
+/// such as the output of `ls`, `ps`, `df`, `git status` or `top`, stay
+/// aligned, and prose keeps natural spacing.
 ///
 /// Programs still see a normal grid of cells; only where text is drawn
-/// changes. Cell backgrounds, selection, and mouse positions still follow
-/// the grid.
+/// changes. Backgrounds, the cursor, selection and mouse positions follow
+/// the drawn text.
 @"font-proportional-layout": bool = false,
 
 /// What color space to use when performing alpha blending.

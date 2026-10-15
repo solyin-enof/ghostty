@@ -37,6 +37,13 @@ Neue` and `font-proportional-layout = true`.
       above/below the viewport; verified with a table whose widest name is
       scrolled off
 
+- [x] `top` looked letter-spaced (alternate screen kept the grid): layout now
+      runs on both screens
+- [x] vim tore prose in coupled rows: identical-prefix, edge-only links,
+      coverage, natural unaligned gaps; `top` column gap + flush-right clock
+- [ ] htop meters: cursor-positioned text keeps monospace geometry next to
+      compacted text (design question: how should never-written cells size?)
+
 ## Milestone 3 — mouse (selection, reporting, links)
 - [x] `proportional.gridX` + `SharedMap` (own lock), unit-tested
 - [x] Renderer publishes viewport cell positions into `renderer.State.cell_x`

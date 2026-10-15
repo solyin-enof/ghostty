@@ -125,18 +125,30 @@ pub fn layout(
                 .after_padding = after_padding,
             });
         }
+
+        // A last word padded out to the right edge (a clock, a right
+        // prompt, a status line) stays at the right edge.
+        if (words.items.len > row_start[y] + 1) {
+            const last = &words.items[words.items.len - 1];
+            last.flush_right = last.after_padding and cols - 1 - last.r <= 2;
+        }
     }
     row_start[rows.len] = @intCast(words.items.len);
     const ws = words.items;
 
     // Link words across coupled rows into chains (union-find).
+    // Runs of coupled rows form tables; `table[y]` numbers them.
     const parent = try arena.alloc(u32, ws.len);
     for (parent, 0..) |*p, i| p.* = @intCast(i);
+    const table = try arena.alloc(u32, rows.len);
+    table[0] = 0;
     for (0..rows.len -| 1) |y| {
+        table[y + 1] = table[y] + 1;
         if (!rows[y].couple or !rows[y + 1].couple) continue;
         const a = ws[row_start[y]..row_start[y + 1]];
         const b = ws[row_start[y + 1]..row_start[y + 2]];
         if (!coupled(a, b, padded[y] and padded[y + 1])) continue;
+        table[y + 1] = table[y];
         for (a, 0..) |wa, ia| {
             const ib = pick(wa, b) orelse continue;
             if (pick(b[ib], a) != ia) continue;
@@ -145,6 +157,53 @@ pub fn layout(
     }
     for (0..ws.len) |i| ws[i].chain = find(parent, @intCast(i));
     try assignAlignment(arena, ws);
+
+    // How each chain treats the gaps before its words. Padding that
+    // differs from row to row is the program aligning a column: it
+    // collapses to the chain's smallest gap (at most one cell), and a
+    // column with padding keeps at least half a cell. When every row has
+    // the same gap (indentation, a gutter repeated on every line) nothing
+    // is being aligned and the gaps stay natural.
+    const gap_min = try arena.alloc(f32, ws.len);
+    const gap_max = try arena.alloc(f32, ws.len);
+    const column = try arena.alloc(bool, ws.len);
+    const members = try arena.alloc(u32, ws.len);
+    const table_rows = try arena.alloc(u32, rows.len);
+    @memset(gap_min, std.math.inf(f32));
+    @memset(gap_max, 0);
+    @memset(column, false);
+    @memset(members, 0);
+    @memset(table_rows, 0);
+    for (0..rows.len) |y| {
+        table_rows[table[y]] += 1;
+        const n = nat[y * stride ..][0..stride];
+        for (row_start[y]..row_start[y + 1]) |i| {
+            const w = ws[i];
+            if (w.alignment == .none) continue;
+            members[w.chain] += 1;
+            if (i == row_start[y]) continue;
+            const gap = n[w.l] - n[ws[i - 1].r + 1];
+            gap_min[w.chain] = @min(gap_min[w.chain], gap);
+            gap_max[w.chain] = @max(gap_max[w.chain], gap);
+            if (w.after_padding) column[w.chain] = true;
+        }
+    }
+
+    // A chain whose words all follow the same gap has no padding doing
+    // alignment work. It's a column only if it runs down (nearly) the
+    // whole table, like GNU `ls -l` fields; otherwise it's free text that
+    // happens to start in the same column, like the arguments of two
+    // commands of the same length in `ps`, and aligning it tears it.
+    for (0..rows.len) |y| {
+        for (row_start[y]..row_start[y + 1]) |i| {
+            const w = &ws[i];
+            if (w.alignment == .none) continue;
+            const uniform = gap_max[w.chain] - gap_min[w.chain] < 0.001;
+            const coverage = @as(f32, @floatFromInt(members[w.chain])) /
+                @as(f32, @floatFromInt(table_rows[table[y]]));
+            if (uniform and coverage < 0.8) w.alignment = .none;
+        }
+    }
 
     // Solve: flow every row, pushing chained words to their chain's
     // common edge, until no chain edge moves. Edges only move right and
@@ -163,12 +222,26 @@ pub fn layout(
             for (row_start[y]..row_start[y + 1]) |i| {
                 const w = ws[i];
 
-                // Padding collapses to at most one cell; leading
-                // indentation is kept as is.
-                const req = if (prev_r) |pr|
-                    prev_end + @min(n[w.l] - n[pr + 1], cell_width)
-                else
-                    n[w.l];
+                // Gaps before unaligned words, like code indentation, stay
+                // natural; see above for aligned ones. (Every gap stays
+                // within its cells' monospace width, so rows never get
+                // wider.)
+                var req = if (prev_r) |pr| gap: {
+                    const natural = n[w.l] - n[pr + 1];
+                    const c = w.chain;
+                    if (w.alignment == .none or gap_max[c] - gap_min[c] < 0.001) {
+                        break :gap prev_end + natural;
+                    }
+                    const collapsed = @min(natural, gap_min[c], cell_width);
+                    break :gap prev_end + if (column[c])
+                        @max(collapsed, cell_width / 2)
+                    else
+                        collapsed;
+                } else n[w.l];
+                if (w.flush_right and w.alignment != .left) {
+                    const grid_end = @as(f32, @floatFromInt(w.r + 1)) * cell_width;
+                    req = @max(req, grid_end - w.width);
+                }
 
                 pos[i] = switch (w.alignment) {
                     .none => req,
@@ -302,6 +375,10 @@ const Word = struct {
     /// two or more blank cells, or a tab or cursor jump.
     after_padding: bool = false,
 
+    /// The row's last word, padded out to (nearly) the last column: it
+    /// keeps its grid position at the right edge.
+    flush_right: bool = false,
+
     /// Union-find root of this word's chain (an index into the words).
     chain: u32 = 0,
 
@@ -316,18 +393,54 @@ fn advance(cell: Cell, cell_width: f32) f32 {
 }
 
 /// True if two adjacent rows share enough word edges to be one table.
-/// When both rows are padded, a share of the shorter row's edges is
+///
+/// Leading words that are identical in both rows (same columns and width:
+/// an editor's line numbers, a comment marker, list numbering, repeated
+/// permissions in `ls -l`) say nothing either way, so they're set aside
+/// and only the rest of the rows is judged, except that identical words
+/// after padding still count as shared columns. If one row has nothing left,
+/// its words all match the other's and coupling is harmless. The same
+/// goes for the next word starting in the same column right after the
+/// prefix (the command after `ps`'s PID and STAT).
+///
+/// When both rows are padded, a share of the shorter rest's edges is
 /// enough (a short last row of `ls -C`). Otherwise it takes a large share
-/// of the longer row's: the widest row of a column has no padding (GNU
+/// of the longer one's: the widest row of a column has no padding (GNU
 /// `ls -l`), but neither does prose, and a prose line can share several
 /// edges with a short table row by coincidence. Failing that, rows couple
-/// when one row's padding lines its words up with the other's.
+/// when one row's padding lines its words up with the other's. Padding
+/// counts anywhere in the row: the identical part can hold a row's only
+/// padded field (`ls -l` sizes).
 fn coupled(a: []const Word, b: []const Word, both_padded: bool) bool {
     if (a.len == 0 or b.len == 0) return false;
-    if (paddedOnto(a, b) or paddedOnto(b, a)) return true;
-    const shared: f32 = @floatFromInt(sharedEdges(a, b, "l") + sharedEdges(a, b, "r"));
-    const words: f32 = @floatFromInt(2 * if (both_padded) @min(a.len, b.len) else @max(a.len, b.len));
-    return shared >= words * if (both_padded) couple_padded else couple_unpadded;
+    var same: usize = 0;
+    var same_columns: usize = 0;
+    while (same < @min(a.len, b.len) and
+        a[same].l == b[same].l and
+        a[same].r == b[same].r and
+        a[same].width == b[same].width) : (same += 1)
+    {
+        // An identical word after padding (not just indentation) is still
+        // a padded column, like equal values in a `ps` column.
+        if (same > 0 and a[same].after_padding and b[same].after_padding) same_columns += 1;
+    }
+    var ra = a[same..];
+    var rb = b[same..];
+    if (ra.len == 0 or rb.len == 0) return true;
+
+    // Right after an identical prefix both rows' next words start in the
+    // same column by construction; that isn't evidence either.
+    if (same > 0 and ra[0].l == rb[0].l) {
+        ra = ra[1..];
+        rb = rb[1..];
+        if (ra.len == 0 or rb.len == 0) return true;
+    }
+
+    if (paddedOnto(ra, rb) or paddedOnto(rb, ra)) return true;
+    const shared: f32 = @floatFromInt(sharedEdges(ra, rb, "l") + sharedEdges(ra, rb, "r") + 2 * same_columns);
+    const words: f32 = @floatFromInt(2 * (same_columns + if (both_padded) @min(ra.len, rb.len) else @max(ra.len, rb.len)));
+    // One shared edge is too easily a coincidence, however short the rows.
+    return shared >= 2 and shared >= words * if (both_padded) couple_padded else couple_unpadded;
 }
 
 /// True if `a` has at least two words after padding and every one of them
@@ -365,9 +478,10 @@ fn sharedEdges(a: []const Word, b: []const Word, comptime side: []const u8) usiz
     return count;
 }
 
-/// The word in `others` that `w` corresponds to: the only word it
-/// overlaps, or else the overlapping word sharing its left edge, or else
-/// its right edge. Null if there is none or it is ambiguous.
+/// The word in `others` that `w` corresponds to: the overlapping word that
+/// shares its left edge, or else its right edge. Merely overlapping isn't
+/// enough; columns line up on an edge, and linking words that only overlap
+/// tears apart prose that happens to sit in coupled rows.
 fn pick(w: Word, others: []const Word) ?usize {
     // First word ending at or after w starts.
     var lo: usize = 0;
@@ -379,7 +493,6 @@ fn pick(w: Word, others: []const Word) ?usize {
     var end = lo;
     while (end < others.len and others[end].l <= w.r) end += 1;
 
-    if (end - lo == 1) return lo;
     for (others[lo..end], lo..) |o, i| if (o.l == w.l) return i;
     for (others[lo..end], lo..) |o, i| if (o.r == w.r) return i;
     return null;
@@ -486,6 +599,11 @@ const Fixture = struct {
     cols: usize,
 
     fn init(alloc: Allocator, text: []const u8) !Fixture {
+        return initPadded(alloc, text, 4);
+    }
+
+    /// Like `init`, with `extra` never-written cells after the longest line.
+    fn initPadded(alloc: Allocator, text: []const u8, extra: usize) !Fixture {
         var lines: std.ArrayList([]u21) = .empty;
         errdefer {
             for (lines.items) |l| alloc.free(l);
@@ -506,7 +624,7 @@ const Fixture = struct {
             cols = @max(cols, line.items.len);
             try lines.append(alloc, try line.toOwnedSlice(alloc));
         }
-        cols += 4; // some trailing never-written cells
+        cols += extra;
 
         const n = lines.items.len;
         const cells = try alloc.alloc(Cell, n * cols);
@@ -782,6 +900,71 @@ test "ps: mixed left and right columns" {
     try f.expectLeft(&.{ .{ 0, "COMM" }, .{ 1, "/sbin/launchd" } });
 }
 
+test "ps: command arguments stay attached to their command" {
+    // PID, STAT and COMMAND are columns; the arguments after each command
+    // are free text that only overlaps words in the next row. They must
+    // stay one space after their command.
+    var f = try testFixture(
+        \\  347 Ss   /usr/sbin/systemstats --daemon
+        \\  359 Ss   /usr/libexec/keybagd -t 15
+        \\  384 Ss   /usr/sbin/securityd -i
+        \\  399 Ss   /usr/libexec/usermanagerd -t 15
+        \\  404 Ss   /usr/libexec/corebrightnessd --launchd
+        \\  430 Ss   /usr/libexec/nsurlsessiond --privileged
+        \\  435 Ss   /usr/libexec/biometrickitd --launchd
+    );
+    defer f.deinit();
+
+    try f.expectLeft(&.{ .{ 0, "Ss" }, .{ 3, "Ss" }, .{ 6, "Ss" } });
+    try f.expectLeft(&.{ .{ 0, "/usr/sbin/systemstats" }, .{ 1, "/usr/libexec/keybagd" } });
+    const args = [_]struct { usize, []const u8, []const u8 }{
+        .{ 0, "/usr/sbin/systemstats", "--daemon" },
+        .{ 1, "/usr/libexec/keybagd", "-t" },
+        .{ 2, "/usr/sbin/securityd", "-i" },
+        .{ 3, "/usr/libexec/usermanagerd", "-t" },
+        .{ 4, "/usr/libexec/corebrightnessd", "--launchd" },
+        .{ 5, "/usr/libexec/nsurlsessiond", "--privileged" },
+        .{ 6, "/usr/libexec/biometrickitd", "--launchd" },
+    };
+    for (args) |a| try testing.expectApproxEqAbs(
+        f.endX(a[0], a[1]) + testAdvance(' '),
+        f.startX(a[0], a[2]),
+        0.001,
+    );
+}
+
+test "ps with padded columns: arguments still aren't aligned" {
+    // The padded RSS column makes these rows a real table, so they couple.
+    // Arguments after commands of equal length start in the same column by
+    // coincidence (nsurlsessiond, biometrickitd); aligning them would open
+    // a hole after the narrower command.
+    var f = try testFixture(
+        \\  PID  %CPU    RSS COMMAND
+        \\  347   0.0  54224 /usr/sbin/systemstats --daemon
+        \\  359   0.0   6272 /usr/libexec/keybagd -t 15
+        \\  384   0.0  15792 /usr/sbin/securityd -i
+        \\  399   0.0   6352 /usr/libexec/usermanagerd -t 15
+        \\  404   0.0  18272 /usr/libexec/corebrightnessd --launchd
+        \\  430   0.0  21280 /usr/libexec/nsurlsessiond --privileged
+        \\  435   0.0  13408 /usr/libexec/biometrickitd --launchd
+    );
+    defer f.deinit();
+
+    try f.expectRight(&.{ .{ 0, "RSS" }, .{ 1, "54224" }, .{ 2, "6272" } });
+    try f.expectLeft(&.{ .{ 0, "COMMAND" }, .{ 1, "/usr/sbin/systemstats" }, .{ 7, "/usr/libexec/biometrickitd" } });
+    const args = [_]struct { usize, []const u8, []const u8 }{
+        .{ 4, "/usr/libexec/usermanagerd", "-t" },
+        .{ 5, "/usr/libexec/corebrightnessd", "--launchd" },
+        .{ 6, "/usr/libexec/nsurlsessiond", "--privileged" },
+        .{ 7, "/usr/libexec/biometrickitd", "--launchd" },
+    };
+    for (args) |a| try testing.expectApproxEqAbs(
+        f.endX(a[0], a[1]) + testAdvance(' '),
+        f.startX(a[0], a[2]),
+        0.001,
+    );
+}
+
 test "prose is never torn apart by coincidental alignment" {
     var f = try testFixture(
         \\The terminal grid is a fifty year old contract between programs
@@ -793,6 +976,58 @@ test "prose is never torn apart by coincidental alignment" {
     defer f.deinit();
 
     for (0..f.rows.len) |row| try f.expectNatural(row);
+}
+
+test "vim: prose after line numbers and comment markers stays prose" {
+    // Rows that share an editor's line-number gutter, a comment marker and
+    // list numbering look alike up front; that says nothing about the
+    // prose after it, which must not be pulled into columns.
+    var f = try testFixture(
+        \\  8 //!   1. Split each row into words (runs of text cells).
+        \\  9 //!   2. Adjacent rows "couple" when they share enough word edges (left or
+        \\ 10 //!      right column) to look like a table. Prose rarely does.
+        \\ 11 //!   3. In coupled rows, words that overlap one-to-one are linked. Linked
+        \\ 12 //!      words form chains; a chain aligns on whichever edge (left or right)
+        \\ 13 //!      most of its members share.
+        \\ 14 //!   4. Rows flow left to right. Padding between words collapses to at most
+        \\ 15 //!      one cell width, and chained words are pushed right to the chain's
+        \\ 16 //!      common edge. Iterate until nothing moves.
+        \\ 17 //!
+        \\ 23 pub const Kind = enum(u2) {
+        \\ 24     /// A visible glyph, including the spacer tail of a wide character
+        \\ 25     /// and cells covered by a ligature (which have zero advance).
+        \\ 26     text,
+    );
+    defer f.deinit();
+
+    for (0..f.rows.len) |row| try f.expectNatural(row);
+}
+
+test "top: aligned columns get a gap, the clock stays at the right edge" {
+    var f = try Fixture.initPadded(testing.allocator,
+        \\Processes: 1181 total, 6 running, 1175 sleeping, 10929 threads                             18:02:12
+        \\
+        \\PID    COMMAND          %CPU TIME     #TH MEM   STATE
+        \\97120  EAUpdaterService 0.0  00:00.07 2   2832K sleeping
+        \\96784  ThemeWidgetContr 0.0  00:01.33 3   15M   sleeping
+        \\96770  Draggable        0.0  02:07.52 3   34M   sleeping
+        \\94567  translationd     0.0  00:02.59 3   7777K sleeping
+    , 0);
+    defer f.deinit();
+    try f.run();
+    try f.expectInvariants();
+
+    try f.expectLeft(&.{ .{ 2, "COMMAND" }, .{ 3, "EAUpdaterService" }, .{ 5, "Draggable" } });
+    try f.expectLeft(&.{ .{ 2, "%CPU" }, .{ 3, "0.0" }, .{ 6, "0.0" } });
+    try f.expectLeft(&.{ .{ 2, "TIME" }, .{ 4, "00:01.33" }, .{ 6, "00:02.59" } });
+
+    // top separates columns with a single space; aligned columns still
+    // get at least half a cell between them, even after the widest name.
+    try testing.expect(f.startX(4, "0.0") - f.endX(4, "ThemeWidgetContr") >= test_cell_width / 2);
+
+    // The clock was padded out to the last column, so it stays there.
+    const grid_width = @as(f32, @floatFromInt(f.cols)) * test_cell_width;
+    try testing.expectApproxEqAbs(grid_width, f.endX(0, "18:02:12"), 0.001);
 }
 
 test "rows marked not to couple are left alone" {

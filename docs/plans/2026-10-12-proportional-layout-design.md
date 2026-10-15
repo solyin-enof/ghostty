@@ -119,6 +119,33 @@ work.)
    `x_map` (renderer thread builds it, app thread reads it: needs a handoff).
 4. Decoration widths (underline length), IME rect, config polish.
 
+**Rules added after trying it live** (each has a fixture test and fails a
+test when removed):
+
+- *Identical prefix.* Leading words identical in both rows (same columns and
+  width: vim's line numbers, comment markers, list numbering) aren't
+  evidence of a table and are set aside before counting shared edges;
+  identical words after padding still count (equal values in a `ps`
+  column). The next word starting in the same column right after that
+  prefix isn't evidence either. Coupling needs at least two shared edges.
+- *Edge links only.* Words link only when they share a left or right edge;
+  merely overlapping no longer counts.
+- *Only varying padding collapses.* A chain whose words all follow the same
+  gap (indentation, a gutter) keeps natural gaps; otherwise gaps collapse to
+  the chain's smallest gap (at most a cell), and a chain with padding gets
+  at least half a cell (`top` separates columns with one space).
+- *Coverage.* A chain with uniform gaps aligns only if it covers 80% of its
+  table's rows; otherwise it's free text that starts in the same column by
+  coincidence (arguments after same-length commands in `ps`).
+- *Unaligned gaps stay natural*, so code indentation in vim survives.
+- *Flush right.* A row's last word, after padding and within two cells of
+  the last column (a clock, a right prompt), keeps its grid end.
+- *Both screens.* The layout now runs on the alternate screen too: `top`,
+  vim and `htop`'s process table read well; the grid with a proportional
+  font looked letter-spaced. Open issue: full-screen apps that place text
+  with cursor jumps (never-written cells keep monospace width) mix
+  monospace and compacted geometry, e.g. `htop`'s meters.
+
 **Scroll stability.** Laying out only the visible rows made columns jump
 while scrolling: a table's column sits past its widest *visible* entry, and
 that changes as rows scroll in (reported with `ls` in a home directory). The

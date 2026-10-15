@@ -2678,10 +2678,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
             }
 
-            // Proportional layout aligns each row against its neighbors, so
-            // a change to any row can move the others: rebuild them all.
-            const proportional_active = self.config.font_proportional_layout and
-                state.screen == .primary;
+            // Proportional layout (on both screens) aligns each row against
+            // its neighbors, so a change to any row can move the others:
+            // rebuild them all.
+            const proportional_active = self.config.font_proportional_layout;
             const captured = state.rowDataRange();
             const rebuild = state.dirty == .full or grid_size_diff or
                 (proportional_active and std.mem.indexOfScalar(
