@@ -113,6 +113,7 @@ pub fn layout(
             }
             const after_padding = gap >= 2 or gap_empty;
             if (words.items.len > row_start[y] and after_padding) padded[y] = true;
+            const after_jump = gap_empty;
             gap = 0;
             gap_empty = false;
 
@@ -123,6 +124,7 @@ pub fn layout(
                 .r = @intCast(x - 1),
                 .width = n[x] - n[l],
                 .after_padding = after_padding,
+                .after_jump = after_jump,
             });
         }
 
@@ -161,9 +163,10 @@ pub fn layout(
     // How each chain treats the gaps before its words. Padding that
     // differs from row to row is the program aligning a column: it
     // collapses to the chain's smallest gap (at most one cell), and a
-    // column with padding keeps at least half a cell. When every row has
-    // the same gap (indentation, a gutter repeated on every line) nothing
-    // is being aligned and the gaps stay natural.
+    // column with padding gets exactly one cell (with cells sized by "0",
+    // about two spaces; top separates columns with just one). When every
+    // row has the same gap (indentation, a gutter repeated on every line)
+    // nothing is being aligned and the gaps stay natural.
     const gap_min = try arena.alloc(f32, ws.len);
     const gap_max = try arena.alloc(f32, ws.len);
     const column = try arena.alloc(bool, ws.len);
@@ -234,13 +237,21 @@ pub fn layout(
                     }
                     const collapsed = @min(natural, gap_min[c], cell_width);
                     break :gap prev_end + if (column[c])
-                        @max(collapsed, cell_width / 2)
+                        cell_width
                     else
                         collapsed;
                 } else n[w.l];
                 if (w.flush_right and w.alignment != .left) {
                     const grid_end = @as(f32, @floatFromInt(w.r + 1)) * cell_width;
                     req = @max(req, grid_end - w.width);
+                }
+
+                // A word the program moved the cursor to keeps its grid
+                // column (unless it's aligned in a table, where columns
+                // compact): full-screen programs lay out regions this way,
+                // like htop's two-column header.
+                if (w.after_jump and w.alignment == .none) {
+                    req = @max(req, @as(f32, @floatFromInt(w.l)) * cell_width);
                 }
 
                 pos[i] = switch (w.alignment) {
@@ -406,6 +417,10 @@ const Word = struct {
     /// The row's last word, padded out to (nearly) the last column: it
     /// keeps its grid position at the right edge.
     flush_right: bool = false,
+
+    /// The gap before this word holds never-written cells: the program
+    /// moved the cursor (or tabbed) to put the word in this column.
+    after_jump: bool = false,
 
     /// Union-find root of this word's chain (an index into the words).
     chain: u32 = 0,
@@ -1058,8 +1073,8 @@ test "top: aligned columns get a gap, the clock stays at the right edge" {
     try f.expectLeft(&.{ .{ 2, "TIME" }, .{ 4, "00:01.33" }, .{ 6, "00:02.59" } });
 
     // top separates columns with a single space; aligned columns still
-    // get at least half a cell between them, even after the widest name.
-    try testing.expect(f.startX(4, "0.0") - f.endX(4, "ThemeWidgetContr") >= test_cell_width / 2);
+    // get a cell between them, even after the widest name.
+    try testing.expectApproxEqAbs(test_cell_width, f.startX(4, "0.0") - f.endX(4, "ThemeWidgetContr"), 0.001);
 
     // The clock was padded out to the last column, so it stays there.
     const grid_width = @as(f32, @floatFromInt(f.cols)) * test_cell_width;
@@ -1081,6 +1096,29 @@ test "rows wider than the grid are squeezed to fit, columns intact" {
     try f.expectLeft(&.{ .{ 0, "a" }, .{ 1, "b" } });
     const limit = @as(f32, @floatFromInt(f.cols)) * 7;
     try testing.expectApproxEqAbs(limit, f.endX(0, "a"), 0.001);
+}
+
+test "cursor-positioned text keeps its grid column" {
+    // Full-screen programs place regions by moving the cursor (htop's
+    // header is two columns of meters); the skipped cells are never
+    // written. Text reached that way starts at its grid column, so the
+    // regions stay where the program put them, while the text inside
+    // each region is proportional.
+    var f = try testFixture(
+        \\Mem[||||||57.8G/128G]~~Tasks: 1755, 9115 thr
+        \\Swp[~~0K/0K]~~Load average: 5.82
+        \\~~~~Uptime: 4 days
+    );
+    defer f.deinit();
+
+    const column: f32 = 32 * test_cell_width;
+    try testing.expectEqual(column, f.startX(0, "Tasks:"));
+    try testing.expectEqual(column, f.startX(1, "Load"));
+    try testing.expectEqual(column, f.startX(2, "Uptime:"));
+    try testing.expectEqual(16 * test_cell_width, f.startX(1, "0K/0K]"));
+
+    // Within a region, text is still proportional.
+    try testing.expectApproxEqAbs(f.endX(1, "Load") + testAdvance(' '), f.startX(1, "average:"), 0.001);
 }
 
 test "rows marked not to couple are left alone" {

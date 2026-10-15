@@ -133,7 +133,11 @@ test when removed):
 - *Only varying padding collapses.* A chain whose words all follow the same
   gap (indentation, a gutter) keeps natural gaps; otherwise gaps collapse to
   the chain's smallest gap (at most a cell), and a chain with padding gets
-  at least half a cell (`top` separates columns with one space).
+  exactly one cell (`top` separates columns with one space; with "0"-sized
+  cells half a cell was no wider than a space).
+- *Cursor jumps keep their column.* An unaligned word reached across
+  never-written cells (cursor movement, tab, erase) starts at its grid
+  column: full-screen programs place regions that way.
 - *Coverage.* A chain with uniform gaps aligns only if it covers 80% of its
   table's rows; otherwise it's free text that starts in the same column by
   coincidence (arguments after same-length commands in `ps`).
@@ -142,9 +146,9 @@ test when removed):
   the last column (a clock, a right prompt), keeps its grid end.
 - *Both screens.* The layout now runs on the alternate screen too: `top`,
   vim and `htop`'s process table read well; the grid with a proportional
-  font looked letter-spaced. Open issue: full-screen apps that place text
-  with cursor jumps (never-written cells keep monospace width) mix
-  monospace and compacted geometry, e.g. `htop`'s meters.
+  font looked letter-spaced. Open issue: `htop` writes most of its header
+  with real spaces, so its Mem/Swp lines don't join the CPU-meter table and
+  `Tasks:`/`Load average:`/`Uptime:` don't line up with each other.
 
 **Cell width.** With the flag on, the grid's cell width is the advance of
 "0" (CSS `ch`) instead of the widest ASCII glyph, so programs get enough

@@ -44,8 +44,10 @@ Neue` and `font-proportional-layout = true`.
 - [x] Lines wrapped at ~60% of the window: with the flag, cells are sized by
       "0" (FaceMetrics.zero_width, CoreText + FreeType); overflowing tables
       are squeezed to fit. Prose now wraps at ~80%.
-- [ ] htop meters: cursor-positioned text keeps monospace geometry next to
-      compacted text (design question: how should never-written cells size?)
+- [x] Cursor-positioned (never-written-gap) words keep their grid column;
+      aligned columns get a one-cell gap (top was tight with "0" cells)
+- [ ] htop header: Mem/Swp rows (written spaces) don't couple with the CPU
+      meter table, so Tasks/Load/Uptime don't line up; left as is
 
 ## Milestone 3 — mouse (selection, reporting, links)
 - [x] `proportional.gridX` + `SharedMap` (own lock), unit-tested
