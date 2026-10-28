@@ -49,6 +49,12 @@ Neue` and `font-proportional-layout = true`.
 - [x] htop header: meter bars (runs of `|`) keep one cell per character, and
       on the alternate screen jumped-to values keep their column; meters,
       values and Tasks/Load line up (Uptime within ~1 cell)
+- [x] vim prose and code still tore under kerning: a chain aligns only if its
+      gaps vary in blank cells (not pixels; replaces the 80% coverage rule),
+      padding is judged after the identical prefix (vim's gutter), a lone
+      skipped cell is a space, and cursor jumps need 2+ skipped cells
+- [x] README section with screenshots (Avenir Next, Georgia, Verdana, Optima,
+      Gill Sans) in `docs/proportional/`; fork published as solyin-enof/ghostty
 
 ## Milestone 3 — mouse (selection, reporting, links)
 - [x] `proportional.gridX` + `SharedMap` (own lock), unit-tested

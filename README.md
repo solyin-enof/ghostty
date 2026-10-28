@@ -1,3 +1,104 @@
+# Ghostty, with proportional fonts
+
+This is a fork of [Ghostty](https://github.com/ghostty-org/ghostty) that
+draws terminal text in proportional (variable-width) fonts while keeping
+the columns programs line up actually lined up. It's an experiment and
+isn't affiliated with the Ghostty project.
+
+Terminals assume every character is the same width, so programs line up
+tables by counting characters and padding with spaces. A proportional font
+breaks that: stock Ghostty (like any terminal) gives every letter the
+width of the widest one, so text comes out letter-spaced. This fork lays
+text out at its natural width and works out, row by row, where the padding
+was meant to line things up.
+
+**Same window, same font (Avenir Next).** Stock Ghostty:
+
+![ls in stock Ghostty with Avenir Next: letter-spaced, two columns](docs/proportional/ls-before.png)
+
+This fork:
+
+![ls in this fork with Avenir Next: natural text, four aligned columns](docs/proportional/ls-after.png)
+
+## More examples
+
+`git log --graph` and `git status` in **Georgia**: the hints stay prose, the
+file names line up.
+
+![git log and git status in Georgia](docs/proportional/git.png)
+
+A table of numbers in **Verdana**: right-aligned columns stay right-aligned
+under their headers.
+
+![planetary data table in Verdana](docs/proportional/table.png)
+
+vim in **Optima**, editing this fork's layout code: comments and code keep
+their natural spacing and indentation.
+
+![vim editing the layout code in Optima](docs/proportional/vim.png)
+
+`htop` in **Gill Sans**: meter bars keep their length, values stay where
+htop put them.
+
+![htop in Gill Sans](docs/proportional/htop.png)
+
+## How it works
+
+Programs still see an ordinary grid of cells, so nothing needs changing on
+their side: cursor movement, `COLUMNS`, line wrapping and full-screen apps
+work as before. Only where each cell is drawn changes.
+
+- Each row is laid out at the glyphs' natural widths.
+- Rows that look like a table (they share word edges and contain padding)
+  have their columns aligned; padding collapses to a one-cell gap. Prose,
+  code and an editor's gutter are left alone.
+- Text a full-screen program moves the cursor to keeps its column, and runs
+  of a repeated symbol (`|||` meters, `-----` rules) keep one cell per
+  character.
+- Cells are sized by the width of `0`, so lines use the window's width; a
+  row of unusually wide text is squeezed to fit.
+- Backgrounds, the cursor, selection and mouse positions follow the drawn
+  text.
+
+The algorithm lives in [`src/renderer/proportional.zig`](src/renderer/proportional.zig),
+tested against real output of `ls`, `git`, `df`, `ps`, `top`, `htop` and vim.
+The design and its history are in
+[`docs/plans/2026-10-12-proportional-layout-design.md`](docs/plans/2026-10-12-proportional-layout-design.md).
+
+## Trying it
+
+macOS only for now. Building needs Zig 0.16, Xcode 26 and its Metal
+Toolchain (`xcodebuild -downloadComponent MetalToolchain`):
+
+```sh
+zig build -Demit-macos-app=false
+cd macos && xcodebuild -project Ghostty.xcodeproj -scheme Ghostty \
+  -configuration Debug SYMROOT="$PWD/build" build
+open build/Debug/Ghostty.app
+```
+
+Then add to your Ghostty config:
+
+```
+font-family = Avenir Next
+font-proportional-layout = true
+```
+
+## Limitations
+
+- macOS only: the OpenGL shaders (Linux) weren't updated, and that build
+  hasn't been compiled.
+- Alignment is inferred from the text, so unusual output can be misjudged.
+- Layout isn't optimized: every change re-lays out the visible rows plus
+  128 rows above and below.
+- The input-method candidate window and inline images aren't adjusted yet.
+
+Developed with [Claude Code](https://claude.com/claude-code). Ghostty is
+by Mitchell Hashimoto and contributors, MIT licensed; the original README
+follows.
+
+---
+
 <!-- LOGO -->
 <h1>
 <p align="center">
