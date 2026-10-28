@@ -44,6 +44,7 @@ alex19ep
 alexbathome
 alexfeijoo44
 alexjuca
+aljohri
 alosarjos
 amadeus
 and-rs
@@ -52,6 +53,7 @@ anhthang
 anmitalidev
 anthonyzhoon
 aprilnea
+aredmondd
 arneshbanerjee
 arvin7liu
 athaapa
@@ -68,6 +70,7 @@ bennettp123
 benodiwal
 bernsno
 beryesa
+binaryfire
 bitigchi
 bkircher
 bleikurr
@@ -85,6 +88,7 @@ chernetskyi
 chronologos
 clemg
 cmwetherell
+complexsplit
 crayxt
 craziestowl
 -creativision meatproxying
@@ -99,6 +103,8 @@ danneu
 danulqua
 dariogriffo
 dave92082
+davey-hughes
+davidhodge
 -davidpmclaughlin Refusing to follow AI policy and exhibit good faith behavior
 davidsanchez222
 deblasis
@@ -110,6 +116,7 @@ diego-moment
 diegoarmstrong
 dkinzler
 dmehala
+dmkenney
 dmunozv04
 dobbylee
 dolzenko
@@ -149,6 +156,7 @@ gagbo
 ghokun
 gmile
 gordonbondon
+-gotar No HITL
 gotenksin
 gpanders
 guilhermetk
@@ -159,6 +167,7 @@ hakonhagland
 halosatrio
 heaths
 heddxh heddxh
+heitoraugustoln
 helium777
 -highimpact-dev Disrespectful AI user
 hlcfan
@@ -169,6 +178,7 @@ hulet
 i999rri
 ibaios
 icodesign
+-ifmael
 illiakrauchanka
 j-c-m
 j0hnm4r5
@@ -206,6 +216,7 @@ kloneets
 knu
 -kody-w
 konstantinhudyakov
+-kooshapari No HITL
 koranir
 korikhin
 kostich
@@ -214,9 +225,11 @@ kristofersoler
 kylesower
 laxystem
 lebdron
+lehni
 lepips
 liby
 linustalacko
+locriani
 lonsagisawa
 lotheac
 louisunlimited
@@ -263,6 +276,7 @@ myleshen
 nagato-yuzuru
 natesmyth
 neo773
+neobrain
 neoto
 neurosnap
 nicholas-ochoa
@@ -278,6 +292,7 @@ nwehg
 ocean6954
 ollieatkinson
 ollioddi
+olrtg
 oshdubh
 otomn
 paaloeye
@@ -301,7 +316,9 @@ pressatojump
 prihlop
 priyans-hu
 pssalman
+pugma
 puzza007
+pyre909
 qappell
 quinnypig
 qwerasd205
@@ -324,6 +341,7 @@ robmorgan
 rockorager
 ronijacobson
 rpfaeffle
+rtgibbons
 ruoyouz
 ruseel
 sahilkmishra
@@ -352,6 +370,7 @@ tasselx
 tbrundige
 tdgroot
 tdslot
+thapakrish
 thirstycrow
 -thomas-trijindev No human in the loop
 thomasfedb
@@ -392,3 +411,4 @@ zeshi09
 zlitus
 -zorzysty Meatproxying
 zubb
+zzznu
