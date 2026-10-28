@@ -67,7 +67,7 @@ The design and its history are in
 
 ## Trying it
 
-macOS only for now. Building needs Zig 0.16, Xcode 26 and its Metal
+macOS only for now. Building needs Zig 0.17, Xcode 26 and its Metal
 Toolchain (`xcodebuild -downloadComponent MetalToolchain`):
 
 ```sh

@@ -5,6 +5,9 @@ Design: `docs/plans/2026-10-12-proportional-layout-design.md`
 ## Setup
 - [x] Branch `proportional` off upstream/main (1e9e14a)
 - [x] Zig 0.16.0 in `.tools/` (git-excluded); Metal Toolchain installed
+- [x] Merged upstream main (2026-10-27, now Zig 0.17.0, also in `.tools/`);
+      README screenshots re-captured: five pixel-identical, htop differs only
+      in live values
 - [x] Baseline builds: `zig build -Demit-macos-app=false`, then the app via
       `cd macos && env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin xcodebuild -project Ghostty.xcodeproj -scheme Ghostty -configuration Debug SYMROOT=$PWD/build build`
 
