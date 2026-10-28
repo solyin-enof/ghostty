@@ -38,7 +38,9 @@ TIOCGWINSZ, cursor addressing, reflow. Only the cell -> pixel mapping changes.
 - `space`: a written space (U+0020); width = shaper advance of the space.
 - `empty`: never-written cell (codepoint 0: tabs, cursor jumps, erase);
   width = `cell_width`. Cursor-positioned output keeps monospace geometry, and
-  trailing empties keep the cursor in sane places.
+  trailing empties keep the cursor in sane places. A lone empty cell between
+  two text cells is a space an editor skipped instead of rewriting (vim does
+  this), so it's as wide as the row's first written space.
 
 ## Layout algorithm
 
@@ -117,6 +119,10 @@ work.)
    the new fields but GLSL ignores them.
 3. Mouse: selection, mouse reporting, link hover map pixel -> cell through
    `x_map` (renderer thread builds it, app thread reads it: needs a handoff).
+   *Done:* the renderer publishes the viewport's cell positions into
+   `renderer.State.cell_x` (a `SharedMap` with its own lock) and `Surface`
+   maps every pointer position onto the grid on entry, so the existing cell
+   lookup, selection, mouse reporting and links are unchanged.
 4. Decoration widths (underline length), IME rect, config polish.
 
 **Rules added after trying it live** (each has a fixture test and fails a
@@ -135,12 +141,19 @@ test when removed):
   the chain's smallest gap (at most a cell), and a chain with padding gets
   exactly one cell (`top` separates columns with one space; with "0"-sized
   cells half a cell was no wider than a space).
-- *Cursor jumps keep their column.* An unaligned word reached across
-  never-written cells (cursor movement, tab, erase) starts at its grid
-  column: full-screen programs place regions that way.
-- *Coverage.* A chain with uniform gaps aligns only if it covers 80% of its
-  table's rows; otherwise it's free text that starts in the same column by
-  coincidence (arguments after same-length commands in `ps`).
+- *Cursor jumps keep their column.* An unaligned word reached across two
+  or more never-written cells (cursor movement, tab, erase) starts at its
+  grid column: full-screen programs place regions that way. Skipping a
+  single cell is how editors avoid rewriting a blank space, not layout.
+- *Uniform gaps don't align.* A chain whose words all follow the same
+  number of blank cells (counting leading indentation for a row's first
+  word) is text that starts in the same column by coincidence: arguments
+  after same-length commands in `ps`, code after vim's line numbers. Cells,
+  not pixels, because kerning makes the same single space a pixel wider
+  after `.` than after a letter.
+- *Padding is judged after the prefix.* Two rows count as padded tables
+  only if both have padding past their identical prefix, so vim's gutter
+  (padding before every line's text) doesn't make prose look like a table.
 - *Unaligned gaps stay natural*, so code indentation in vim survives.
 - *Flush right.* A row's last word, after padding and within two cells of
   the last column (a clock, a right prompt), keeps its grid end.
@@ -182,8 +195,9 @@ stability (columns can still move while output arrives), incremental layout
 ## Testing
 
 `proportional.zig` unit tests use fixtures captured from real commands, with
-fake metrics (`i`=3px, `W`=12px, others 7px, space 3px, cell 12px) so every
-assertion fails if alignment breaks:
+fake metrics (`i`=3px, `W`=12px, others 7px, space 3px, cell 12px; a space
+after `.` is 4px, like kerning in real fonts) so every assertion fails if
+alignment breaks:
 
 - aligned output (ls -C, ls -l, git status, ps): every member of a column
   starts (or, right-aligned, ends) at the same x;

@@ -92,8 +92,22 @@ pub fn layout(
     for (rows, 0..) |row, y| {
         assert(row.cells.len == cols);
         const n = nat[y * stride ..][0..stride];
+
+        // A lone never-written cell between two words is a space an editor
+        // skipped instead of rewriting it, so it's as wide as the row's
+        // written spaces (if it has any).
+        var space: ?f32 = null;
+        for (row.cells) |c| if (c.kind == .space) {
+            space = c.advance;
+            break;
+        };
+
         n[0] = 0;
-        for (row.cells, 0..) |cell, x| n[x + 1] = n[x] + advance(cell, cell_width);
+        for (row.cells, 0..) |cell, x| {
+            const lone = cell.kind == .empty and x > 0 and x + 1 < cols and
+                row.cells[x - 1].kind == .text and row.cells[x + 1].kind == .text;
+            n[x + 1] = n[x] + if (lone and space != null) space.? else advance(cell, cell_width);
+        }
     }
 
     // Words, in row order. Words in row y are
@@ -101,28 +115,25 @@ pub fn layout(
     var words: std.ArrayList(Word) = .empty;
     const row_start = try arena.alloc(u32, rows.len + 1);
 
-    // A row is padded if some gap between two of its words is wider than
-    // one space or was made by a tab or cursor movement. Prose isn't.
-    const padded = try arena.alloc(bool, rows.len);
     for (rows, 0..) |row, y| {
         row_start[y] = @intCast(words.items.len);
-        padded[y] = false;
         const n = nat[y * stride ..][0..stride];
         var x: usize = 0;
         var gap: usize = 0;
-        var gap_empty = false;
+        var gap_empty: usize = 0;
         while (x < cols) {
             if (row.cells[x].kind != .text) {
                 gap += 1;
-                gap_empty = gap_empty or row.cells[x].kind == .empty;
+                if (row.cells[x].kind == .empty) gap_empty += 1;
                 x += 1;
                 continue;
             }
-            const after_padding = gap >= 2 or gap_empty;
-            if (words.items.len > row_start[y] and after_padding) padded[y] = true;
-            const after_jump = gap_empty;
+            const after_padding = gap >= 2;
+            // Skipping a single blank cell is how editors avoid rewriting a
+            // space that's already blank, not layout.
+            const after_jump = gap_empty >= 2;
             gap = 0;
-            gap_empty = false;
+            gap_empty = 0;
 
             const l = x;
             while (x < cols and row.cells[x].kind == .text) x += 1;
@@ -156,7 +167,7 @@ pub fn layout(
         if (!rows[y].couple or !rows[y + 1].couple) continue;
         const a = ws[row_start[y]..row_start[y + 1]];
         const b = ws[row_start[y + 1]..row_start[y + 2]];
-        if (!coupled(a, b, padded[y] and padded[y + 1])) continue;
+        if (!coupled(a, b)) continue;
         table[y + 1] = table[y];
         for (a, 0..) |wa, ia| {
             const ib = pick(wa, b) orelse continue;
@@ -167,51 +178,43 @@ pub fn layout(
     for (0..ws.len) |i| ws[i].chain = find(parent, @intCast(i));
     try assignAlignment(arena, ws);
 
-    // How each chain treats the gaps before its words. Padding that
-    // differs from row to row is the program aligning a column: it
-    // collapses to the chain's smallest gap (at most one cell), and a
-    // column with padding gets exactly one cell (with cells sized by "0",
-    // about two spaces; top separates columns with just one). When every
-    // row has the same gap (indentation, a gutter repeated on every line)
-    // nothing is being aligned and the gaps stay natural.
+    // The gaps before each chain's words (leading indentation for a row's
+    // first word). Padding that differs from row to row is the program
+    // aligning a column. When every row has the same gap nothing is being
+    // aligned: the words just start in the same column, like code lines
+    // that differ by a character, a gutter repeated on every line, or the
+    // arguments of two same-length commands in `ps`. Aligning those would
+    // only open holes, so such chains don't align. A column with padding
+    // collapses it to the chain's smallest gap (at most one cell) and then
+    // gets exactly one cell (with cells sized by "0", about two spaces;
+    // top separates columns with just one).
+    // (Same gap means the same number of blank cells: a space's width
+    // varies with kerning.)
     const gap_min = try arena.alloc(f32, ws.len);
-    const gap_max = try arena.alloc(f32, ws.len);
+    const cells_min = try arena.alloc(u16, ws.len);
+    const cells_max = try arena.alloc(u16, ws.len);
     const column = try arena.alloc(bool, ws.len);
-    const members = try arena.alloc(u32, ws.len);
-    const table_rows = try arena.alloc(u32, rows.len);
     @memset(gap_min, std.math.inf(f32));
-    @memset(gap_max, 0);
+    @memset(cells_min, std.math.maxInt(u16));
+    @memset(cells_max, 0);
     @memset(column, false);
-    @memset(members, 0);
-    @memset(table_rows, 0);
     for (0..rows.len) |y| {
-        table_rows[table[y]] += 1;
         const n = nat[y * stride ..][0..stride];
         for (row_start[y]..row_start[y + 1]) |i| {
             const w = ws[i];
             if (w.alignment == .none) continue;
-            members[w.chain] += 1;
-            if (i == row_start[y]) continue;
-            const gap = n[w.l] - n[ws[i - 1].r + 1];
+            const first = i == row_start[y];
+            const gap = if (first) n[w.l] else n[w.l] - n[ws[i - 1].r + 1];
+            const gap_cells = if (first) w.l else w.l - ws[i - 1].r - 1;
             gap_min[w.chain] = @min(gap_min[w.chain], gap);
-            gap_max[w.chain] = @max(gap_max[w.chain], gap);
+            cells_min[w.chain] = @min(cells_min[w.chain], gap_cells);
+            cells_max[w.chain] = @max(cells_max[w.chain], gap_cells);
             if (w.after_padding) column[w.chain] = true;
         }
     }
-
-    // A chain whose words all follow the same gap has no padding doing
-    // alignment work. It's a column only if it runs down (nearly) the
-    // whole table, like GNU `ls -l` fields; otherwise it's free text that
-    // happens to start in the same column, like the arguments of two
-    // commands of the same length in `ps`, and aligning it tears it.
-    for (0..rows.len) |y| {
-        for (row_start[y]..row_start[y + 1]) |i| {
-            const w = &ws[i];
-            if (w.alignment == .none) continue;
-            const uniform = gap_max[w.chain] - gap_min[w.chain] < 0.001;
-            const coverage = @as(f32, @floatFromInt(members[w.chain])) /
-                @as(f32, @floatFromInt(table_rows[table[y]]));
-            if (uniform and coverage < 0.8) w.alignment = .none;
+    for (ws) |*w| {
+        if (w.alignment != .none and cells_min[w.chain] == cells_max[w.chain]) {
+            w.alignment = .none;
         }
     }
 
@@ -239,9 +242,7 @@ pub fn layout(
                 var req = if (prev_r) |pr| gap: {
                     const natural = n[w.l] - n[pr + 1];
                     const c = w.chain;
-                    if (w.alignment == .none or gap_max[c] - gap_min[c] < 0.001) {
-                        break :gap prev_end + natural;
-                    }
+                    if (w.alignment == .none) break :gap prev_end + natural;
                     const collapsed = @min(natural, gap_min[c], cell_width);
                     break :gap prev_end + if (column[c])
                         cell_width
@@ -289,7 +290,7 @@ pub fn layout(
     }
 
     // Write cell positions.
-    for (rows, 0..) |row, y| {
+    for (0..rows.len) |y| {
         const n = nat[y * stride ..][0..stride];
         const o = out[y * stride ..][0..stride];
         var x: usize = 0;
@@ -301,7 +302,7 @@ pub fn layout(
             // previous word but never pass the word itself.
             while (x < w.l) : (x += 1) {
                 o[x] = @min(cur, pos[i]);
-                cur += advance(row.cells[x], cell_width);
+                cur += n[x + 1] - n[x];
             }
 
             // Cells inside a word keep their natural offsets.
@@ -310,7 +311,7 @@ pub fn layout(
         }
         while (x < cols) : (x += 1) {
             o[x] = cur;
-            cur += advance(row.cells[x], cell_width);
+            cur += n[x + 1] - n[x];
         }
         o[cols] = cur;
     }
@@ -458,8 +459,9 @@ const Word = struct {
     /// keeps its grid position at the right edge.
     flush_right: bool = false,
 
-    /// The gap before this word holds never-written cells: the program
-    /// moved the cursor (or tabbed) to put the word in this column.
+    /// The gap before this word holds two or more never-written cells:
+    /// the program moved the cursor (or tabbed) to put the word in this
+    /// column.
     after_jump: bool = false,
 
     /// Union-find root of this word's chain (an index into the words).
@@ -486,15 +488,15 @@ fn advance(cell: Cell, cell_width: f32) f32 {
 /// goes for the next word starting in the same column right after the
 /// prefix (the command after `ps`'s PID and STAT).
 ///
-/// When both rows are padded, a share of the shorter rest's edges is
+/// When both rests are padded, a share of the shorter rest's edges is
 /// enough (a short last row of `ls -C`). Otherwise it takes a large share
 /// of the longer one's: the widest row of a column has no padding (GNU
 /// `ls -l`), but neither does prose, and a prose line can share several
 /// edges with a short table row by coincidence. Failing that, rows couple
-/// when one row's padding lines its words up with the other's. Padding
-/// counts anywhere in the row: the identical part can hold a row's only
-/// padded field (`ls -l` sizes).
-fn coupled(a: []const Word, b: []const Word, both_padded: bool) bool {
+/// when one row's padding lines its words up with the other's. Padding in
+/// the identical part doesn't count: in an editor that's indentation after
+/// the line number.
+fn coupled(a: []const Word, b: []const Word) bool {
     if (a.len == 0 or b.len == 0) return false;
     var same: usize = 0;
     var same_columns: usize = 0;
@@ -520,10 +522,18 @@ fn coupled(a: []const Word, b: []const Word, both_padded: bool) bool {
     }
 
     if (paddedOnto(ra, rb) or paddedOnto(rb, ra)) return true;
+    const both_padded = padded(ra, same == 0) and padded(rb, same == 0);
     const shared: f32 = @floatFromInt(sharedEdges(ra, rb, "l") + sharedEdges(ra, rb, "r") + 2 * same_columns);
     const words: f32 = @floatFromInt(2 * (same_columns + if (both_padded) @min(ra.len, rb.len) else @max(ra.len, rb.len)));
     // One shared edge is too easily a coincidence, however short the rows.
     return shared >= 2 and shared >= words * if (both_padded) couple_padded else couple_unpadded;
+}
+
+/// True if some gap between words in `ws` is padding. The gap before a
+/// row's first word is leading indentation, which doesn't count.
+fn padded(ws: []const Word, starts_row: bool) bool {
+    for (ws[@intFromBool(starts_row)..]) |w| if (w.after_padding) return true;
+    return false;
 }
 
 /// True if `a` has at least two words after padding and every one of them
@@ -655,8 +665,8 @@ fn mode(ws: []const Word, members: []const u32, comptime side: []const u8) struc
 //
 // Fixtures are real command output captured on macOS (uid/gid numeric).
 // `~` marks a TAB, which a terminal turns into never-written cells up to
-// the next multiple of 8, and a backquote marks one never-written cell
-// (the cursor moved past it). Metrics are fake and deliberately uneven so a
+// the next multiple of 8, and `¬` marks one never-written cell (the
+// cursor moved past it). Metrics are fake and deliberately uneven so a
 // test fails the moment alignment stops happening: 'i' is 3px, 'W' is
 // 12px, a space is 3px, everything else is 7px, and a cell is 12px.
 
@@ -703,7 +713,7 @@ const Fixture = struct {
                 if (c == '~') {
                     try line.append(alloc, 0);
                     while (line.items.len % 8 != 0) try line.append(alloc, 0);
-                } else if (c == '`') {
+                } else if (c == '¬') {
                     try line.append(alloc, 0);
                 } else try line.append(alloc, c);
             }
@@ -723,7 +733,12 @@ const Fixture = struct {
                 const c: u21 = if (col < line.len) line[col] else 0;
                 cell.* = switch (c) {
                     0 => .{ .kind = .empty },
-                    ' ' => .{ .kind = .space, .advance = testAdvance(' ') },
+                    // Kerning: real fonts make a space after a period a
+                    // little wider than other spaces.
+                    ' ' => .{ .kind = .space, .advance = if (col > 0 and line[col - 1] == '.')
+                        testAdvance(' ') + 1
+                    else
+                        testAdvance(' ') },
                     else => .{ .kind = .text, .advance = testAdvance(c) },
                 };
             }
@@ -1097,6 +1112,50 @@ test "vim: prose after line numbers and comment markers stays prose" {
     for (0..f.rows.len) |row| try f.expectNatural(row);
 }
 
+test "vim: a comment paragraph stays prose despite gutter and kerning" {
+    // Every line here starts with a line number, indentation and "//", and
+    // the comment's words land in the same columns now and then. Neither
+    // makes it a table: indentation in the identical prefix isn't padding,
+    // and words after single spaces aren't a column even though kerning
+    // makes the spaces a fraction of a pixel different.
+    var f = try testFixture(
+        \\186     // The gaps before each chain's words (leading indentation for a row's
+        \\187     // first word). Padding that differs from row to row is the program
+        \\188     // aligning a column. When every row has the same gap nothing is being
+        \\189     // aligned: the words just start in the same column, like code lines
+        \\190     // that differ by a character, a gutter repeated on every line, or the
+        \\191     // arguments of two same-length commands in `ps`. Aligning those would
+        \\192     // only open holes, so such chains don't align. A column with padding
+        \\193     // collapses it to the chain's smallest gap (at most one cell) and then
+        \\194     // gets exactly one cell (with cells sized by "0", about two spaces;
+        \\195     // top separates columns with just one).
+        \\196     const gap_min = try arena.alloc(f32, ws.len);
+        \\197     const gap_max = try arena.alloc(f32, ws.len);
+        \\198     const column = try arena.alloc(bool, ws.len);
+    );
+    defer f.deinit();
+
+    for (0..f.rows.len) |row| try f.expectNatural(row);
+}
+
+test "vim: code lines that line up by coincidence aren't aligned" {
+    // Lines of code that differ by a character or two put their words in
+    // the same columns, separated by single spaces. In a proportional font
+    // those words land a few pixels apart; pulling them into columns opens
+    // holes in the code (and in a comment above it).
+    var f = try testFixture(
+        \\176     // nothing is being aligned and the gaps stay natural.
+        \\177     const gap_min = try arena.alloc(f32, ws.len);
+        \\178     const gap_max = try arena.alloc(f32, ws.len);
+        \\179     const column = try arena.alloc(bool, ws.len);
+        \\180     const members = try arena.alloc(u32, ws.len);
+        \\181     const table_rows = try arena.alloc(u32, rows.len);
+    );
+    defer f.deinit();
+
+    for (0..f.rows.len) |row| try f.expectNatural(row);
+}
+
 test "top: aligned columns get a gap, the clock stays at the right edge" {
     var f = try Fixture.initPadded(testing.allocator,
         \\Processes: 1181 total, 6 running, 1175 sleeping, 10929 threads                             18:02:12
@@ -1172,8 +1231,8 @@ test "htop meters: values the cursor jumped to keep their column" {
     // (where skipped cells are mostly tabs) the column compacts as usual.
     const text =
         \\  0[||||||||||||||||||||||||||||||||||||||||90.7%]
-        \\  4[||||`````````````````````````````````````9.2%]
-        \\  5[|||``````````````````````````````````````6.0%]
+        \\  4[||||¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬9.2%]
+        \\  5[|||¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬¬6.0%]
     ;
     for ([_]bool{ true, false }) |anchor| {
         var f = try Fixture.init(testing.allocator, text);
@@ -1190,6 +1249,32 @@ test "htop meters: values the cursor jumped to keep their column" {
             try testing.expect(f.startX(1, "9.2%]") < column);
         }
     }
+}
+
+test "a single skipped cell is just a space" {
+    // After clearing the screen, vim moves the cursor over a space instead
+    // of writing it, leaving one never-written cell. That's not layout:
+    // even on the alternate screen the next word follows one space later.
+    var f = try Fixture.init(testing.allocator, "align.¬A column with padding");
+    defer f.deinit();
+    f.rows[0].anchor_jumps = true;
+    try f.run();
+
+    try testing.expectApproxEqAbs(f.endX(0, "align.") + testAdvance(' '), f.startX(0, "A"), 0.001);
+}
+
+test "kerning doesn't turn single spaces into a column" {
+    // `b` and `d` start in the same column after one space each; the space
+    // after "a." is kerned a pixel wider. That's still the same gap, so
+    // nothing is aligned and `d` isn't pushed to match `b`.
+    var f = try testFixture(
+        \\x  a. b
+        \\y  cc d
+    );
+    defer f.deinit();
+
+    try f.expectNatural(0);
+    try f.expectNatural(1);
 }
 
 test "rows marked not to couple are left alone" {
